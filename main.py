@@ -1,4 +1,3 @@
-import math
 import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,7 +18,7 @@ HEADERS = {
     "x-apisports-key": API_KEY,
 }
 
-app = FastAPI(title="Top Picks Backend", version="2.0.0")
+app = FastAPI(title="Top Picks Backend", version="3.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,35 +30,21 @@ app.add_middleware(
 
 DAILY_CACHE: Dict[str, Dict[str, Any]] = {}
 
-# Ligas prioritarias. Puedes ampliar esta lista.
 TARGET_LEAGUES = {
-    # España
     140,  # LaLiga
     141,  # Segunda
-    # UEFA
     2,    # Champions
     3,    # Europa League
-    848,  # Conference League
-    # Inglaterra
-    39,   # Premier
-    40,   # Championship
-    # Italia
+    39,   # Premier League
     135,  # Serie A
-    136,  # Serie B
-    # Alemania
     78,   # Bundesliga
-    79,   # Bundesliga 2
-    # Francia
     61,   # Ligue 1
-    62,   # Ligue 2
-    # Mundiales / selecciones
     1,    # World Cup
     4,    # Euro Championship
 }
 
 def madrid_now() -> datetime:
-    tz = pytz.timezone(TZ_NAME)
-    return datetime.now(tz)
+    return datetime.now(pytz.timezone(TZ_NAME))
 
 def day_key() -> str:
     return madrid_now().strftime("%Y-%m-%d")
@@ -78,44 +63,48 @@ def safe_float(v: Any) -> Optional[float]:
     except Exception:
         return None
 
-def implied_probability(odds: float) -> float:
-    return 1.0 / odds if odds > 0 else 0.0
-
 def clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
 
+def implied_probability(odds: float) -> float:
+    return 1.0 / odds if odds > 0 else 0.0
+
 def iso_to_local_hhmm(iso_str: str) -> str:
-    tz = pytz.timezone(TZ_NAME)
-    dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone(tz)
-    return dt.strftime("%H:%M")
-
-def season_for_today() -> int:
-    now = madrid_now()
-    # Temporada simple estilo europeo
-    return now.year if now.month >= 7 else now.year - 1
-
-def next_7_days() -> Tuple[str, str]:
-    now = madrid_now()
-    end = now + timedelta(days=7)
-    return now.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+    dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    return dt.astimezone(pytz.timezone(TZ_NAME)).strftime("%H:%M")
 
 def get_upcoming_fixtures() -> List[Dict[str, Any]]:
-    date_from, date_to = next_7_days()
     fixtures: List[Dict[str, Any]] = []
+    now = madrid_now()
 
-    # Pedimos por fecha, luego filtramos ligas objetivo
-    current = datetime.strptime(date_from, "%Y-%m-%d")
-    end = datetime.strptime(date_to, "%Y-%m-%d")
+    for i in range(0, 7):
+        target_date = (now + timedelta(days=i)).strftime("%Y-%m-%d")
+        payload = api_get("/fixtures", {"date": target_date})
 
-    while current <= end:
-        payload = api_get("/fixtures", {"date": current.strftime("%Y-%m-%d")})
         for item in payload.get("response", []):
             league_id = item.get("league", {}).get("id")
             status_short = item.get("fixture", {}).get("status", {}).get("short")
-            if league_id in TARGET_LEAGUES and status_short in {"NS", "TBD"}:
-                fixtures.append(item)
-        current += timedelta(days=1)
+            fixture_date_str = item.get("fixture", {}).get("date")
 
+            if league_id not in TARGET_LEAGUES:
+                continue
+
+            if status_short not in {"NS", "TBD"}:
+                continue
+
+            try:
+                fixture_dt = datetime.fromisoformat(fixture_date_str.replace("Z", "+00:00")).astimezone(
+                    pytz.timezone(TZ_NAME)
+                )
+            except Exception:
+                continue
+
+            if fixture_dt <= now:
+                continue
+
+            fixtures.append(item)
+
+    fixtures.sort(key=lambda x: x.get("fixture", {}).get("date", ""))
     return fixtures
 
 def get_prediction(fixture_id: int) -> Optional[Dict[str, Any]]:
@@ -126,56 +115,46 @@ def get_prediction(fixture_id: int) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
-def pick_best_h2h_from_odds_response(odds_item: Dict[str, Any]) -> Optional[Tuple[float, float, str]]:
-    """
-    Devuelve (home_odds, away_odds, bookmaker_name)
-    Intenta adaptarse a distintas formas de respuesta del endpoint odds.
-    """
+def pick_best_odds(odds_item: Dict[str, Any]) -> Optional[Tuple[float, float, str]]:
     bookmakers = odds_item.get("bookmakers", [])
     if not bookmakers:
         return None
 
-    # Preferimos bookmaker conocido si existe
-    preferred = ["Bet365", "1xBet", "William Hill", "Bwin", "Marathonbet", "Unibet"]
+    preferred = ["Bet365", "1xBet", "William Hill", "Bwin", "Unibet", "Marathonbet"]
 
-    def bookmaker_rank(name: str) -> int:
+    def rank_name(name: str) -> int:
         try:
             return preferred.index(name)
         except ValueError:
             return 999
 
-    bookmakers_sorted = sorted(
-        bookmakers,
-        key=lambda b: bookmaker_rank(str(b.get("name", "")))
-    )
+    bookmakers = sorted(bookmakers, key=lambda b: rank_name(str(b.get("name", ""))))
 
-    for bookmaker in bookmakers_sorted:
-        name = str(bookmaker.get("name", "Bookmaker"))
+    for bookmaker in bookmakers:
+        bookmaker_name = str(bookmaker.get("name", "Bookmaker"))
         bets = bookmaker.get("bets", [])
+
         for bet in bets:
-            # 1X2 / Match Winner / Winner
             bet_name = str(bet.get("name", "")).lower()
             if bet_name not in {"match winner", "winner", "1x2"}:
                 continue
 
-            values = bet.get("values", [])
             home_odds = None
             away_odds = None
 
-            for v in values:
-                label = str(v.get("value", "")).strip().lower()
-                odd = safe_float(v.get("odd"))
+            for value in bet.get("values", []):
+                label = str(value.get("value", "")).strip().lower()
+                odd = safe_float(value.get("odd"))
                 if odd is None:
                     continue
 
-                # Home / Away o 1 / 2
                 if label in {"home", "1"}:
                     home_odds = odd
                 elif label in {"away", "2"}:
                     away_odds = odd
 
             if home_odds and away_odds:
-                return home_odds, away_odds, name
+                return home_odds, away_odds, bookmaker_name
 
     return None
 
@@ -186,7 +165,7 @@ def get_match_odds(fixture_id: int) -> Optional[Dict[str, Any]]:
         if not items:
             return None
 
-        parsed = pick_best_h2h_from_odds_response(items[0])
+        parsed = pick_best_odds(items[0])
         if not parsed:
             return None
 
@@ -199,17 +178,7 @@ def get_match_odds(fixture_id: int) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
-def recent_form_points(form_str: Optional[str]) -> float:
-    if not form_str:
-        return 0.5
-    score = 0.0
-    mapping = {"W": 1.0, "D": 0.5, "L": 0.0}
-    vals = [mapping.get(ch.upper(), 0.5) for ch in form_str[-5:]]
-    if not vals:
-        return 0.5
-    return sum(vals) / len(vals)
-
-def get_last5_team_stats(team_id: int, is_home_context: bool) -> Dict[str, float]:
+def get_last5_team_stats(team_id: int, home_context: bool) -> Dict[str, float]:
     try:
         payload = api_get("/fixtures", {
             "team": team_id,
@@ -220,12 +189,13 @@ def get_last5_team_stats(team_id: int, is_home_context: bool) -> Dict[str, float
 
         if not items:
             return {
-                "points_form": 0.5,
-                "goals_for": 1.0,
-                "goals_against": 1.0,
-                "win_rate": 0.4,
-                "clean_sheet_rate": 0.2,
-                "context_rate": 0.5,
+                "points_form": 0.50,
+                "goals_for": 1.00,
+                "goals_against": 1.00,
+                "win_rate": 0.40,
+                "clean_sheet_rate": 0.20,
+                "context_rate": 0.50,
+                "consistency": 0.50,
             }
 
         points = 0.0
@@ -234,6 +204,7 @@ def get_last5_team_stats(team_id: int, is_home_context: bool) -> Dict[str, float
         wins = 0
         clean = 0
         context_good = 0
+        goal_diffs = []
 
         for m in items:
             home_id = m["teams"]["home"]["id"]
@@ -247,6 +218,7 @@ def get_last5_team_stats(team_id: int, is_home_context: bool) -> Dict[str, float
 
             gf += team_goals
             ga += opp_goals
+            goal_diffs.append(abs(team_goals - opp_goals))
 
             if team_goals > opp_goals:
                 points += 3
@@ -257,11 +229,13 @@ def get_last5_team_stats(team_id: int, is_home_context: bool) -> Dict[str, float
             if opp_goals == 0:
                 clean += 1
 
-            if is_home_context == is_home:
-                if team_goals >= opp_goals:
-                    context_good += 1
+            if is_home == home_context and team_goals >= opp_goals:
+                context_good += 1
 
         n = len(items)
+        avg_diff = sum(goal_diffs) / n if n else 1.0
+        consistency = clamp(1.0 - (avg_diff / 3.0), 0.0, 1.0)
+
         return {
             "points_form": points / (n * 3),
             "goals_for": gf / n,
@@ -269,22 +243,23 @@ def get_last5_team_stats(team_id: int, is_home_context: bool) -> Dict[str, float
             "win_rate": wins / n,
             "clean_sheet_rate": clean / n,
             "context_rate": context_good / n,
+            "consistency": consistency,
         }
     except Exception:
         return {
-            "points_form": 0.5,
-            "goals_for": 1.0,
-            "goals_against": 1.0,
-            "win_rate": 0.4,
-            "clean_sheet_rate": 0.2,
-            "context_rate": 0.5,
+            "points_form": 0.50,
+            "goals_for": 1.00,
+            "goals_against": 1.00,
+            "win_rate": 0.40,
+            "clean_sheet_rate": 0.20,
+            "context_rate": 0.50,
+            "consistency": 0.50,
         }
 
-def normalize_goal_attack(x: float) -> float:
+def normalize_attack(x: float) -> float:
     return clamp(x / 2.5, 0.0, 1.0)
 
-def normalize_goal_defense(x: float) -> float:
-    # Menos goles encajados = mejor
+def normalize_defense(x: float) -> float:
     return clamp(1.0 - (x / 2.5), 0.0, 1.0)
 
 def model_probabilities(
@@ -294,45 +269,53 @@ def model_probabilities(
     home_team = fixture_item["teams"]["home"]
     away_team = fixture_item["teams"]["away"]
 
-    home_stats = get_last5_team_stats(home_team["id"], is_home_context=True)
-    away_stats = get_last5_team_stats(away_team["id"], is_home_context=False)
+    home_stats = get_last5_team_stats(home_team["id"], home_context=True)
+    away_stats = get_last5_team_stats(away_team["id"], home_context=False)
 
-    # Señal extra del endpoint predictions si viene
-    pred_percent_home = 0.0
-    pred_percent_away = 0.0
+    pred_home = 0.0
+    pred_away = 0.0
     if prediction:
-        compare = prediction.get("comparison", {})
         try:
-            pred_percent_home = safe_float(str(compare.get("form", {}).get("home", "0")).replace("%", "")) or 0.0
-            pred_percent_away = safe_float(str(compare.get("form", {}).get("away", "0")).replace("%", "")) or 0.0
-            pred_percent_home /= 100.0
-            pred_percent_away /= 100.0
+            winner = prediction.get("predictions", {}).get("winner", {})
+            winner_name = str(winner.get("name", "")).strip().lower()
+
+            if winner_name == str(home_team["name"]).strip().lower():
+                pred_home = 0.08
+            elif winner_name == str(away_team["name"]).strip().lower():
+                pred_away = 0.08
+
+            compare = prediction.get("comparison", {})
+            form_home = safe_float(str(compare.get("form", {}).get("home", "0")).replace("%", "")) or 0.0
+            form_away = safe_float(str(compare.get("form", {}).get("away", "0")).replace("%", "")) or 0.0
+            pred_home += form_home / 1000.0
+            pred_away += form_away / 1000.0
         except Exception:
-            pred_percent_home = 0.0
-            pred_percent_away = 0.0
+            pred_home = 0.0
+            pred_away = 0.0
 
     home_strength = (
-        0.24 * home_stats["points_form"] +
+        0.22 * home_stats["points_form"] +
         0.18 * home_stats["context_rate"] +
-        0.17 * normalize_goal_attack(home_stats["goals_for"]) +
-        0.16 * normalize_goal_defense(home_stats["goals_against"]) +
-        0.10 * home_stats["win_rate"] +
-        0.08 * home_stats["clean_sheet_rate"] +
-        0.07 * pred_percent_home
+        0.15 * normalize_attack(home_stats["goals_for"]) +
+        0.15 * normalize_defense(home_stats["goals_against"]) +
+        0.08 * home_stats["win_rate"] +
+        0.07 * home_stats["clean_sheet_rate"] +
+        0.08 * home_stats["consistency"] +
+        0.07 * pred_home
     )
 
     away_strength = (
-        0.24 * away_stats["points_form"] +
+        0.22 * away_stats["points_form"] +
         0.18 * away_stats["context_rate"] +
-        0.17 * normalize_goal_attack(away_stats["goals_for"]) +
-        0.16 * normalize_goal_defense(away_stats["goals_against"]) +
-        0.10 * away_stats["win_rate"] +
-        0.08 * away_stats["clean_sheet_rate"] +
-        0.07 * pred_percent_away
+        0.15 * normalize_attack(away_stats["goals_for"]) +
+        0.15 * normalize_defense(away_stats["goals_against"]) +
+        0.08 * away_stats["win_rate"] +
+        0.07 * away_stats["clean_sheet_rate"] +
+        0.08 * away_stats["consistency"] +
+        0.07 * pred_away
     )
 
-    # Pequeña ventaja casa
-    home_strength += 0.03
+    home_strength += 0.03  # ventaja local pequeña
 
     total = max(home_strength + away_strength, 1e-6)
     p_home = clamp(home_strength / total, 0.05, 0.90)
@@ -349,58 +332,80 @@ def model_probabilities(
     if home_stats["context_rate"] > away_stats["context_rate"]:
         home_reasons.append("rinde mejor en casa")
     if away_stats["context_rate"] > home_stats["context_rate"]:
-        away_reasons.append("rinde mejor fuera de casa")
+        away_reasons.append("rinde mejor fuera")
 
     if home_stats["goals_for"] > away_stats["goals_for"]:
-        home_reasons.append("más producción ofensiva")
+        home_reasons.append("más gol reciente")
     if away_stats["goals_for"] > home_stats["goals_for"]:
-        away_reasons.append("más producción ofensiva")
+        away_reasons.append("más gol reciente")
 
     if home_stats["goals_against"] < away_stats["goals_against"]:
         home_reasons.append("más solidez defensiva")
     if away_stats["goals_against"] < home_stats["goals_against"]:
         away_reasons.append("más solidez defensiva")
 
+    if home_stats["consistency"] > away_stats["consistency"]:
+        home_reasons.append("más consistencia")
+    if away_stats["consistency"] > home_stats["consistency"]:
+        away_reasons.append("más consistencia")
+
     if not home_reasons:
-        home_reasons = ["mejor encaje general del modelo", "más estabilidad", "contexto favorable"]
+        home_reasons = ["mejor encaje general", "más estabilidad", "mejor contexto"]
     if not away_reasons:
-        away_reasons = ["mejor encaje general del modelo", "más estabilidad", "contexto favorable"]
+        away_reasons = ["mejor encaje general", "más estabilidad", "mejor contexto"]
 
     return p_home, p_away, home_reasons[:3], away_reasons[:3]
+
+def classify_pick_type(odds: float) -> str:
+    if 1.60 <= odds <= 2.20:
+        return "solido"
+    if 2.00 <= odds <= 3.20:
+        return "medio"
+    return "agresivo"
 
 def confidence_from_edge(edge: float, model_prob: float) -> str:
     if edge >= 0.10 and model_prob >= 0.55:
         return "verde"
-    if edge >= 0.06:
+    if edge >= 0.05:
         return "amarillo"
     return "rojo"
 
 def side_label(side: str, home_name: str, away_name: str) -> str:
-    return f"Ganador {home_name}" if side == "home" else f"Ganador {away_name}"
+    return f"Gana {home_name}" if side == "home" else f"Gana {away_name}"
 
 def build_tipster_explanation(
     side: str,
     reasons: List[str],
     model_prob: float,
-    implied_prob: float
+    implied_prob: float,
+    odds: float
 ) -> str:
     subject = "El local" if side == "home" else "El visitante"
-    diff = round((model_prob - implied_prob) * 100, 1)
+    edge = round((model_prob - implied_prob) * 100, 1)
     joined = ", ".join(reasons[:3])
     return (
         f"{subject} entra por {joined}. "
-        f"El modelo le da un {round(model_prob * 100, 1)}% de probabilidad, "
-        f"por encima del {round(implied_prob * 100, 1)}% implícito de la cuota. "
-        f"Value estimado: +{diff}%."
+        f"La cuota {round(odds, 2)} implica un {round(implied_prob * 100, 1)}%, "
+        f"pero el modelo lo estima en {round(model_prob * 100, 1)}%. "
+        f"Value estimado: +{edge}%."
     )
 
-def score_pick(edge: float, model_prob: float, confidence: str) -> float:
-    conf_bonus = {"verde": 0.12, "amarillo": 0.06, "rojo": 0.0}.get(confidence, 0.0)
-    return edge * 0.65 + model_prob * 0.25 + conf_bonus
+def score_pick(edge: float, model_prob: float, pick_type: str, consistency_boost: float) -> float:
+    type_bonus = {"solido": 0.10, "medio": 0.08, "agresivo": 0.06}.get(pick_type, 0.0)
+    return edge * 0.55 + model_prob * 0.25 + consistency_boost * 0.10 + type_bonus
 
-def generate_real_picks() -> Dict[str, Any]:
+def valid_by_type(pick_type: str, edge: float, model_prob: float) -> bool:
+    if pick_type == "solido":
+        return edge >= 0.04 and model_prob >= 0.55
+    if pick_type == "medio":
+        return edge >= 0.04 and model_prob >= 0.42
+    if pick_type == "agresivo":
+        return edge >= 0.05 and model_prob >= 0.28
+    return False
+
+def get_candidates() -> List[Dict[str, Any]]:
     fixtures = get_upcoming_fixtures()
-    picks: List[Dict[str, Any]] = []
+    candidates: List[Dict[str, Any]] = []
 
     for item in fixtures:
         fixture = item.get("fixture", {})
@@ -418,7 +423,6 @@ def generate_real_picks() -> Dict[str, Any]:
         home_odds = odds["home_odds"]
         away_odds = odds["away_odds"]
 
-        # Solo cuotas entre 1.60 y 6.00
         valid_home = 1.60 <= home_odds <= 6.00
         valid_away = 1.60 <= away_odds <= 6.00
         if not valid_home and not valid_away:
@@ -433,73 +437,113 @@ def generate_real_picks() -> Dict[str, Any]:
         edge_home = p_home - implied_home if valid_home else -999.0
         edge_away = p_away - implied_away if valid_away else -999.0
 
-        # Umbral mínimo de value
-        if edge_home < 0.06 and edge_away < 0.06:
-            continue
-
-        if edge_home >= edge_away:
-            side = "home"
-            chosen_odds = home_odds
-            model_prob = p_home
-            implied_prob = implied_home
-            edge = edge_home
-            reasons = home_reasons
-        else:
-            side = "away"
-            chosen_odds = away_odds
-            model_prob = p_away
-            implied_prob = implied_away
-            edge = edge_away
-            reasons = away_reasons
-
-        confidence = confidence_from_edge(edge, model_prob)
-        if confidence == "rojo":
-            continue
-
         home_name = teams["home"]["name"]
         away_name = teams["away"]["name"]
 
-        pick = {
-            "fixture_id": fixture_id,
-            "competition": league.get("name"),
-            "country": league.get("country"),
-            "match": f"{home_name} vs {away_name}",
-            "starts_at": iso_to_local_hhmm(fixture["date"]),
-            "pick": side_label(side, home_name, away_name),
-            "side": side,
-            "odds": round(chosen_odds, 2),
-            "model_probability": round(model_prob * 100, 1),
-            "implied_probability": round(implied_prob * 100, 1),
-            "value_edge": round(edge * 100, 1),
-            "confidence": confidence,
-            "bookmaker": odds.get("bookmaker"),
-            "tipster_explanation": build_tipster_explanation(
-                side=side,
-                reasons=reasons,
-                model_prob=model_prob,
-                implied_prob=implied_prob,
-            ),
-            "league_id": league.get("id"),
-            "score": round(score_pick(edge, model_prob, confidence), 6),
-        }
-        picks.append(pick)
+        if valid_home:
+            pick_type = classify_pick_type(home_odds)
+            if valid_by_type(pick_type, edge_home, p_home):
+                confidence = confidence_from_edge(edge_home, p_home)
+                candidates.append({
+                    "fixture_id": fixture_id,
+                    "competition": league.get("name"),
+                    "country": league.get("country"),
+                    "match": f"{home_name} vs {away_name}",
+                    "starts_at": iso_to_local_hhmm(fixture["date"]),
+                    "pick": side_label("home", home_name, away_name),
+                    "side": "home",
+                    "odds": round(home_odds, 2),
+                    "model_probability": round(p_home * 100, 1),
+                    "implied_probability": round(implied_home * 100, 1),
+                    "value_edge": round(edge_home * 100, 1),
+                    "confidence": confidence,
+                    "type": pick_type,
+                    "bookmaker": odds.get("bookmaker"),
+                    "tipster_explanation": build_tipster_explanation(
+                        "home", home_reasons, p_home, implied_home, home_odds
+                    ),
+                    "score": round(
+                        score_pick(edge_home, p_home, pick_type, 0.5),
+                        6
+                    )
+                })
 
-    # Orden por score, luego mejor value, luego mejor cuota
-    picks.sort(key=lambda x: (x["score"], x["value_edge"], x["odds"]), reverse=True)
+        if valid_away:
+            pick_type = classify_pick_type(away_odds)
+            if valid_by_type(pick_type, edge_away, p_away):
+                confidence = confidence_from_edge(edge_away, p_away)
+                candidates.append({
+                    "fixture_id": fixture_id,
+                    "competition": league.get("name"),
+                    "country": league.get("country"),
+                    "match": f"{home_name} vs {away_name}",
+                    "starts_at": iso_to_local_hhmm(fixture["date"]),
+                    "pick": side_label("away", home_name, away_name),
+                    "side": "away",
+                    "odds": round(away_odds, 2),
+                    "model_probability": round(p_away * 100, 1),
+                    "implied_probability": round(implied_away * 100, 1),
+                    "value_edge": round(edge_away * 100, 1),
+                    "confidence": confidence,
+                    "type": pick_type,
+                    "bookmaker": odds.get("bookmaker"),
+                    "tipster_explanation": build_tipster_explanation(
+                        "away", away_reasons, p_away, implied_away, away_odds
+                    ),
+                    "score": round(
+                        score_pick(edge_away, p_away, pick_type, 0.5),
+                        6
+                    )
+                })
 
-    # Máximo 3 picks
-    final_picks = picks[:3]
+    # Evitar dos picks del mismo partido si es posible
+    candidates.sort(key=lambda x: (x["score"], x["value_edge"], x["model_probability"]), reverse=True)
+    return candidates
+
+def select_daily_picks(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    solid = [c for c in candidates if c["type"] == "solido"]
+    medium = [c for c in candidates if c["type"] == "medio"]
+    aggressive = [c for c in candidates if c["type"] == "agresivo"]
+
+    selected: List[Dict[str, Any]] = []
+    used_fixtures = set()
+
+    def take_best(group: List[Dict[str, Any]]):
+        for item in group:
+            if item["fixture_id"] not in used_fixtures:
+                selected.append(item)
+                used_fixtures.add(item["fixture_id"])
+                return
+
+    take_best(solid)
+    take_best(medium)
+    take_best(aggressive)
+
+    # Rellenar hasta 3 con los mejores restantes
+    for item in candidates:
+        if len(selected) >= 3:
+            break
+        if item["fixture_id"] in used_fixtures:
+            continue
+        selected.append(item)
+        used_fixtures.add(item["fixture_id"])
+
+    return selected[:3]
+
+def generate_real_picks() -> Dict[str, Any]:
+    candidates = get_candidates()
+    picks = select_daily_picks(candidates)
 
     return {
         "date": day_key(),
         "generated_at": madrid_now().strftime("%H:%M"),
         "source": "API-FOOTBALL real fixtures + odds + predictions",
-        "picks": final_picks,
+        "picks": picks
     }
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend"}
+    return {"status": "ok", "service": "top-picks-backend-v3"}
 
 @app.get("/health")
 def health():
