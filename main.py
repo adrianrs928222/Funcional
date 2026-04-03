@@ -18,7 +18,7 @@ HEADERS = {
     "x-apisports-key": API_KEY,
 }
 
-app = FastAPI(title="Top Picks Backend", version="3.0.0")
+app = FastAPI(title="Top Picks Backend", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,26 +28,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DAILY_CACHE: Dict[str, Dict[str, Any]] = {}
+CACHE_FILE = "daily_cache.json"
 
 TARGET_LEAGUES = {
-    140,  # LaLiga
-    141,  # Segunda
-    2,    # Champions
-    3,    # Europa League
-    39,   # Premier League
-    135,  # Serie A
-    78,   # Bundesliga
-    61,   # Ligue 1
-    1,    # World Cup
-    4,    # Euro Championship
+    140, 141, 39, 40, 135, 136, 78, 79, 61, 62, 2, 3, 848, 1, 4
 }
 
 def madrid_now() -> datetime:
     return datetime.now(pytz.timezone(TZ_NAME))
-
-def day_key() -> str:
-    return madrid_now().strftime("%Y-%m-%d")
 
 def api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     url = f"{BASE_URL}{path}"
@@ -73,11 +61,36 @@ def iso_to_local_hhmm(iso_str: str) -> str:
     dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
     return dt.astimezone(pytz.timezone(TZ_NAME)).strftime("%H:%M")
 
-def get_upcoming_fixtures() -> List[Dict[str, Any]]:
+def load_cache() -> Optional[Dict[str, Any]]:
+    if not os.path.exists(CACHE_FILE):
+        return None
+    try:
+        import json
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        cached_until = data.get("cached_until")
+        if not cached_until:
+            return None
+        until_dt = datetime.fromisoformat(cached_until)
+        if madrid_now() < until_dt.astimezone(pytz.timezone(TZ_NAME)):
+            return data
+        return None
+    except Exception:
+        return None
+
+def save_cache(data: Dict[str, Any]) -> None:
+    try:
+        import json
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def get_upcoming_fixtures(days_ahead: int = 7) -> List[Dict[str, Any]]:
     fixtures: List[Dict[str, Any]] = []
     now = madrid_now()
 
-    for i in range(0, 7):
+    for i in range(days_ahead):
         target_date = (now + timedelta(days=i)).strftime("%Y-%m-%d")
         payload = api_get("/fixtures", {"date": target_date})
 
@@ -88,7 +101,6 @@ def get_upcoming_fixtures() -> List[Dict[str, Any]]:
 
             if league_id not in TARGET_LEAGUES:
                 continue
-
             if status_short not in {"NS", "TBD"}:
                 continue
 
@@ -283,15 +295,8 @@ def model_probabilities(
                 pred_home = 0.08
             elif winner_name == str(away_team["name"]).strip().lower():
                 pred_away = 0.08
-
-            compare = prediction.get("comparison", {})
-            form_home = safe_float(str(compare.get("form", {}).get("home", "0")).replace("%", "")) or 0.0
-            form_away = safe_float(str(compare.get("form", {}).get("away", "0")).replace("%", "")) or 0.0
-            pred_home += form_home / 1000.0
-            pred_away += form_away / 1000.0
         except Exception:
-            pred_home = 0.0
-            pred_away = 0.0
+            pass
 
     home_strength = (
         0.22 * home_stats["points_form"] +
@@ -315,7 +320,7 @@ def model_probabilities(
         0.07 * pred_away
     )
 
-    home_strength += 0.03  # ventaja local pequeña
+    home_strength += 0.03
 
     total = max(home_strength + away_strength, 1e-6)
     p_home = clamp(home_strength / total, 0.05, 0.90)
@@ -366,7 +371,7 @@ def classify_pick_type(odds: float) -> str:
 def confidence_from_edge(edge: float, model_prob: float) -> str:
     if edge >= 0.10 and model_prob >= 0.55:
         return "verde"
-    if edge >= 0.05:
+    if edge >= 0.03:
         return "amarillo"
     return "rojo"
 
@@ -396,23 +401,60 @@ def score_pick(edge: float, model_prob: float, pick_type: str, consistency_boost
 
 def valid_by_type(pick_type: str, edge: float, model_prob: float) -> bool:
     if pick_type == "solido":
-        return edge >= 0.04 and model_prob >= 0.55
+        return edge >= 0.02 and model_prob >= 0.50
     if pick_type == "medio":
-        return edge >= 0.04 and model_prob >= 0.42
+        return edge >= 0.02 and model_prob >= 0.38
     if pick_type == "agresivo":
-        return edge >= 0.05 and model_prob >= 0.28
+        return edge >= 0.03 and model_prob >= 0.25
     return False
 
-def get_candidates() -> List[Dict[str, Any]]:
+def build_candidate(
+    fixture_id: int,
+    competition: str,
+    country: str,
+    match: str,
+    starts_at: str,
+    pick: str,
+    side: str,
+    odds: float,
+    model_prob: float,
+    implied_prob: float,
+    confidence: str,
+    pick_type: str,
+    bookmaker: str,
+    explanation: str,
+    score: float
+) -> Dict[str, Any]:
+    return {
+        "fixture_id": fixture_id,
+        "competition": competition,
+        "country": country,
+        "match": match,
+        "starts_at": starts_at,
+        "pick": pick,
+        "side": side,
+        "odds": round(odds, 2),
+        "model_probability": round(model_prob * 100, 1),
+        "implied_probability": round(implied_prob * 100, 1),
+        "value_edge": round((model_prob - implied_prob) * 100, 1),
+        "confidence": confidence,
+        "type": pick_type,
+        "bookmaker": bookmaker,
+        "tipster_explanation": explanation,
+        "score": round(score, 6),
+    }
+
+def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     fixtures = get_upcoming_fixtures()
-    candidates: List[Dict[str, Any]] = []
+    strong_candidates: List[Dict[str, Any]] = []
+    fallback_candidates: List[Dict[str, Any]] = []
 
     for item in fixtures:
         fixture = item.get("fixture", {})
         league = item.get("league", {})
         teams = item.get("teams", {})
-
         fixture_id = fixture.get("id")
+
         if not fixture_id:
             continue
 
@@ -434,79 +476,56 @@ def get_candidates() -> List[Dict[str, Any]]:
         implied_home = implied_probability(home_odds)
         implied_away = implied_probability(away_odds)
 
-        edge_home = p_home - implied_home if valid_home else -999.0
-        edge_away = p_away - implied_away if valid_away else -999.0
-
         home_name = teams["home"]["name"]
         away_name = teams["away"]["name"]
+        match = f"{home_name} vs {away_name}"
+        starts_at = iso_to_local_hhmm(fixture["date"])
+        competition = league.get("name")
+        country = league.get("country")
+        bookmaker = odds.get("bookmaker", "N/D")
 
         if valid_home:
             pick_type = classify_pick_type(home_odds)
-            if valid_by_type(pick_type, edge_home, p_home):
-                confidence = confidence_from_edge(edge_home, p_home)
-                candidates.append({
-                    "fixture_id": fixture_id,
-                    "competition": league.get("name"),
-                    "country": league.get("country"),
-                    "match": f"{home_name} vs {away_name}",
-                    "starts_at": iso_to_local_hhmm(fixture["date"]),
-                    "pick": side_label("home", home_name, away_name),
-                    "side": "home",
-                    "odds": round(home_odds, 2),
-                    "model_probability": round(p_home * 100, 1),
-                    "implied_probability": round(implied_home * 100, 1),
-                    "value_edge": round(edge_home * 100, 1),
-                    "confidence": confidence,
-                    "type": pick_type,
-                    "bookmaker": odds.get("bookmaker"),
-                    "tipster_explanation": build_tipster_explanation(
-                        "home", home_reasons, p_home, implied_home, home_odds
-                    ),
-                    "score": round(
-                        score_pick(edge_home, p_home, pick_type, 0.5),
-                        6
-                    )
-                })
+            edge = p_home - implied_home
+            conf = confidence_from_edge(edge, p_home)
+            candidate = build_candidate(
+                fixture_id, competition, country, match, starts_at,
+                side_label("home", home_name, away_name), "home",
+                home_odds, p_home, implied_home, conf, pick_type, bookmaker,
+                build_tipster_explanation("home", home_reasons, p_home, implied_home, home_odds),
+                score_pick(edge, p_home, pick_type, 0.5)
+            )
+            fallback_candidates.append(candidate)
+            if valid_by_type(pick_type, edge, p_home):
+                strong_candidates.append(candidate)
 
         if valid_away:
             pick_type = classify_pick_type(away_odds)
-            if valid_by_type(pick_type, edge_away, p_away):
-                confidence = confidence_from_edge(edge_away, p_away)
-                candidates.append({
-                    "fixture_id": fixture_id,
-                    "competition": league.get("name"),
-                    "country": league.get("country"),
-                    "match": f"{home_name} vs {away_name}",
-                    "starts_at": iso_to_local_hhmm(fixture["date"]),
-                    "pick": side_label("away", home_name, away_name),
-                    "side": "away",
-                    "odds": round(away_odds, 2),
-                    "model_probability": round(p_away * 100, 1),
-                    "implied_probability": round(implied_away * 100, 1),
-                    "value_edge": round(edge_away * 100, 1),
-                    "confidence": confidence,
-                    "type": pick_type,
-                    "bookmaker": odds.get("bookmaker"),
-                    "tipster_explanation": build_tipster_explanation(
-                        "away", away_reasons, p_away, implied_away, away_odds
-                    ),
-                    "score": round(
-                        score_pick(edge_away, p_away, pick_type, 0.5),
-                        6
-                    )
-                })
+            edge = p_away - implied_away
+            conf = confidence_from_edge(edge, p_away)
+            candidate = build_candidate(
+                fixture_id, competition, country, match, starts_at,
+                side_label("away", home_name, away_name), "away",
+                away_odds, p_away, implied_away, conf, pick_type, bookmaker,
+                build_tipster_explanation("away", away_reasons, p_away, implied_away, away_odds),
+                score_pick(edge, p_away, pick_type, 0.5)
+            )
+            fallback_candidates.append(candidate)
+            if valid_by_type(pick_type, edge, p_away):
+                strong_candidates.append(candidate)
 
-    # Evitar dos picks del mismo partido si es posible
-    candidates.sort(key=lambda x: (x["score"], x["value_edge"], x["model_probability"]), reverse=True)
-    return candidates
+    strong_candidates.sort(key=lambda x: (x["score"], x["value_edge"], x["model_probability"]), reverse=True)
+    fallback_candidates.sort(key=lambda x: (x["score"], x["model_probability"], x["odds"]), reverse=True)
 
-def select_daily_picks(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    solid = [c for c in candidates if c["type"] == "solido"]
-    medium = [c for c in candidates if c["type"] == "medio"]
-    aggressive = [c for c in candidates if c["type"] == "agresivo"]
+    return strong_candidates, fallback_candidates
 
+def select_daily_picks(strong_candidates: List[Dict[str, Any]], fallback_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     selected: List[Dict[str, Any]] = []
     used_fixtures = set()
+
+    solid = [c for c in strong_candidates if c["type"] == "solido"]
+    medium = [c for c in strong_candidates if c["type"] == "medio"]
+    aggressive = [c for c in strong_candidates if c["type"] == "agresivo"]
 
     def take_best(group: List[Dict[str, Any]]):
         for item in group:
@@ -519,31 +538,47 @@ def select_daily_picks(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     take_best(medium)
     take_best(aggressive)
 
-    # Rellenar hasta 3 con los mejores restantes
-    for item in candidates:
-        if len(selected) >= 3:
+    # Rellenar con fuertes
+    for item in strong_candidates:
+        if len(selected) >= 5:
             break
         if item["fixture_id"] in used_fixtures:
             continue
         selected.append(item)
         used_fixtures.add(item["fixture_id"])
 
-    return selected[:3]
+    # Fallback si faltan picks
+    for item in fallback_candidates:
+        if len(selected) >= 5:
+            break
+        if item["fixture_id"] in used_fixtures:
+            continue
+        selected.append(item)
+        used_fixtures.add(item["fixture_id"])
+
+    return selected[:5]
 
 def generate_real_picks() -> Dict[str, Any]:
-    candidates = get_candidates()
-    picks = select_daily_picks(candidates)
+    strong_candidates, fallback_candidates = get_candidates()
+    picks = select_daily_picks(strong_candidates, fallback_candidates)
 
-    return {
-        "date": day_key(),
-        "generated_at": madrid_now().strftime("%H:%M"),
+    now = madrid_now()
+    cached_until = now + timedelta(hours=24)
+
+    data = {
+        "date": now.strftime("%Y-%m-%d"),
+        "generated_at": now.strftime("%H:%M"),
+        "cached_until": cached_until.isoformat(),
         "source": "API-FOOTBALL real fixtures + odds + predictions",
+        "count": len(picks),
         "picks": picks
     }
+    save_cache(data)
+    return data
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v3"}
+    return {"status": "ok", "service": "top-picks-backend-v4"}
 
 @app.get("/health")
 def health():
@@ -551,16 +586,12 @@ def health():
 
 @app.get("/top-picks-today")
 def top_picks_today():
-    key = day_key()
-
-    if key in DAILY_CACHE:
-        return DAILY_CACHE[key]
+    cached = load_cache()
+    if cached:
+        return cached
 
     try:
-        data = generate_real_picks()
-        DAILY_CACHE.clear()
-        DAILY_CACHE[key] = data
-        return data
+        return generate_real_picks()
     except requests.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"Error API-Football: {str(e)}")
     except Exception as e:
