@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 API_KEY = os.getenv("API_KEY", "").strip()
@@ -18,7 +18,7 @@ HEADERS = {
     "x-apisports-key": API_KEY,
 }
 
-app = FastAPI(title="Top Picks Backend", version="5.1.0")
+app = FastAPI(title="Top Picks Backend", version="5.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,23 +57,23 @@ TARGET_LEAGUES = {
 
 def league_priority(league_id: int) -> int:
     priority_map = {
-        2: 100,
-        1: 98,
-        4: 97,
-        3: 95,
-        848: 90,
+        2: 100,   # Champions
+        1: 98,    # World Cup
+        4: 97,    # Euro
+        3: 95,    # Europa League
+        848: 90,  # Conference League
 
-        39: 85,
-        140: 84,
-        135: 83,
-        78: 82,
-        61: 81,
+        39: 85,   # Premier
+        140: 84,  # LaLiga
+        135: 83,  # Serie A
+        78: 82,   # Bundesliga
+        61: 81,   # Ligue 1
 
-        40: 70,
-        141: 69,
-        79: 68,
-        136: 67,
-        62: 66,
+        40: 70,   # Championship
+        141: 69,  # LaLiga 2
+        79: 68,   # Bundesliga 2
+        136: 67,  # Serie B
+        62: 66,   # Ligue 2
     }
     return priority_map.get(league_id, 10)
 
@@ -126,6 +126,13 @@ def save_cache(data: Dict[str, Any]) -> None:
         import json
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def clear_cache() -> None:
+    try:
+        if os.path.exists(CACHE_FILE):
+            os.remove(CACHE_FILE)
     except Exception:
         pass
 
@@ -447,7 +454,6 @@ def score_pick(edge: float, model_prob: float, pick_type: str, consistency_boost
     type_bonus = {"solido": 0.10, "medio": 0.08, "agresivo": 0.06}.get(pick_type, 0.0)
     return edge * 0.55 + model_prob * 0.25 + consistency_boost * 0.10 + type_bonus
 
-# MÁS FLEXIBLE PARA QUE SALGAN PICKS REALES CON MÁS FACILIDAD
 def valid_by_type(pick_type: str, edge: float, model_prob: float) -> bool:
     if pick_type == "solido":
         return edge >= 0.00 and model_prob >= 0.48
@@ -646,17 +652,20 @@ def generate_real_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v5.1"}
+    return {"status": "ok", "service": "top-picks-backend-v5.2"}
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
 
 @app.get("/top-picks-today")
-def top_picks_today():
-    cached = load_cache()
-    if cached:
-        return cached
+def top_picks_today(refresh: int = Query(default=0)):
+    if refresh == 1:
+        clear_cache()
+    else:
+        cached = load_cache()
+        if cached:
+            return cached
 
     try:
         return generate_real_picks()
