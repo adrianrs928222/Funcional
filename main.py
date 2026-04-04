@@ -18,7 +18,7 @@ HEADERS = {
     "x-apisports-key": API_KEY,
 }
 
-app = FastAPI(title="Top Picks Backend", version="5.0.0")
+app = FastAPI(title="Top Picks Backend", version="5.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,26 +57,23 @@ TARGET_LEAGUES = {
 
 def league_priority(league_id: int) -> int:
     priority_map = {
-        # Máxima prioridad
-        2: 100,   # Champions
-        1: 98,    # World Cup
-        4: 97,    # Euro
-        3: 95,    # Europa League
-        848: 90,  # Conference League
+        2: 100,
+        1: 98,
+        4: 97,
+        3: 95,
+        848: 90,
 
-        # Ligas top
-        39: 85,   # Premier
-        140: 84,  # LaLiga
-        135: 83,  # Serie A
-        78: 82,   # Bundesliga
-        61: 81,   # Ligue 1
+        39: 85,
+        140: 84,
+        135: 83,
+        78: 82,
+        61: 81,
 
-        # Segundas
-        40: 70,   # Championship
-        141: 69,  # LaLiga 2
-        79: 68,   # Bundesliga 2
-        136: 67,  # Serie B
-        62: 66,   # Ligue 2
+        40: 70,
+        141: 69,
+        79: 68,
+        136: 67,
+        62: 66,
     }
     return priority_map.get(league_id, 10)
 
@@ -164,10 +161,9 @@ def get_upcoming_fixtures(days_ahead: int = 7) -> List[Dict[str, Any]]:
 
     fixtures.sort(
         key=lambda x: (
-            league_priority(x.get("league", {}).get("id", 0)),
+            -league_priority(x.get("league", {}).get("id", 0)),
             x.get("fixture", {}).get("date", "")
-        ),
-        reverse=True
+        )
     )
     return fixtures
 
@@ -451,13 +447,14 @@ def score_pick(edge: float, model_prob: float, pick_type: str, consistency_boost
     type_bonus = {"solido": 0.10, "medio": 0.08, "agresivo": 0.06}.get(pick_type, 0.0)
     return edge * 0.55 + model_prob * 0.25 + consistency_boost * 0.10 + type_bonus
 
+# MÁS FLEXIBLE PARA QUE SALGAN PICKS REALES CON MÁS FACILIDAD
 def valid_by_type(pick_type: str, edge: float, model_prob: float) -> bool:
     if pick_type == "solido":
-        return edge >= 0.02 and model_prob >= 0.50
+        return edge >= 0.00 and model_prob >= 0.48
     if pick_type == "medio":
-        return edge >= 0.02 and model_prob >= 0.38
+        return edge >= -0.01 and model_prob >= 0.35
     if pick_type == "agresivo":
-        return edge >= 0.03 and model_prob >= 0.25
+        return edge >= -0.02 and model_prob >= 0.22
     return False
 
 def build_candidate(
@@ -649,7 +646,7 @@ def generate_real_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v5"}
+    return {"status": "ok", "service": "top-picks-backend-v5.1"}
 
 @app.get("/health")
 def health():
