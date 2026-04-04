@@ -18,7 +18,7 @@ HEADERS = {
     "x-apisports-key": API_KEY,
 }
 
-app = FastAPI(title="Top Picks Backend", version="5.2.0")
+app = FastAPI(title="Top Picks Backend", version="5.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -417,9 +417,9 @@ def model_probabilities(
     return p_home, p_away, home_reasons[:3], away_reasons[:3]
 
 def classify_pick_type(odds: float) -> str:
-    if 1.60 <= odds <= 2.20:
+    if 1.45 <= odds <= 2.10:
         return "solido"
-    if 2.00 <= odds <= 3.20:
+    if 2.10 < odds <= 3.50:
         return "medio"
     return "agresivo"
 
@@ -440,14 +440,14 @@ def build_tipster_explanation(
     implied_prob: float,
     odds: float
 ) -> str:
-    subject = "El local" if side == "home" else "El visitante"
     edge = round((model_prob - implied_prob) * 100, 1)
     joined = ", ".join(reasons[:3])
+    subject = "El local" if side == "home" else "El visitante"
     return (
         f"{subject} entra por {joined}. "
         f"La cuota {round(odds, 2)} implica un {round(implied_prob * 100, 1)}%, "
         f"pero el modelo lo estima en {round(model_prob * 100, 1)}%. "
-        f"Value estimado: +{edge}%."
+        f"Value estimado: {edge:+.1f}%."
     )
 
 def score_pick(edge: float, model_prob: float, pick_type: str, consistency_boost: float) -> float:
@@ -456,11 +456,11 @@ def score_pick(edge: float, model_prob: float, pick_type: str, consistency_boost
 
 def valid_by_type(pick_type: str, edge: float, model_prob: float) -> bool:
     if pick_type == "solido":
-        return edge >= 0.00 and model_prob >= 0.48
+        return edge >= -0.02 and model_prob >= 0.44
     if pick_type == "medio":
-        return edge >= -0.01 and model_prob >= 0.35
+        return edge >= -0.03 and model_prob >= 0.32
     if pick_type == "agresivo":
-        return edge >= -0.02 and model_prob >= 0.22
+        return edge >= -0.05 and model_prob >= 0.20
     return False
 
 def build_candidate(
@@ -523,8 +523,8 @@ def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         home_odds = odds["home_odds"]
         away_odds = odds["away_odds"]
 
-        valid_home = 1.60 <= home_odds <= 6.00
-        valid_away = 1.60 <= away_odds <= 6.00
+        valid_home = 1.45 <= home_odds <= 8.00
+        valid_away = 1.45 <= away_odds <= 8.00
         if not valid_home and not valid_away:
             continue
 
@@ -595,7 +595,10 @@ def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
 
     return strong_candidates, fallback_candidates
 
-def select_daily_picks(strong_candidates: List[Dict[str, Any]], fallback_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def select_daily_picks(
+    strong_candidates: List[Dict[str, Any]],
+    fallback_candidates: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     selected: List[Dict[str, Any]] = []
     used_fixtures = set()
 
@@ -603,7 +606,7 @@ def select_daily_picks(strong_candidates: List[Dict[str, Any]], fallback_candida
     medium = [c for c in strong_candidates if c["type"] == "medio"]
     aggressive = [c for c in strong_candidates if c["type"] == "agresivo"]
 
-    def take_best(group: List[Dict[str, Any]]):
+    def take_best(group: List[Dict[str, Any]]) -> None:
         for item in group:
             if item["fixture_id"] not in used_fixtures:
                 selected.append(item)
@@ -652,7 +655,7 @@ def generate_real_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v5.2"}
+    return {"status": "ok", "service": "top-picks-backend-v5.3"}
 
 @app.get("/health")
 def health():
