@@ -18,7 +18,7 @@ HEADERS = {
     "x-apisports-key": API_KEY,
 }
 
-app = FastAPI(title="Top Picks Backend", version="4.0.0")
+app = FastAPI(title="Top Picks Backend", version="5.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,8 +31,54 @@ app.add_middleware(
 CACHE_FILE = "daily_cache.json"
 
 TARGET_LEAGUES = {
-    140, 141, 39, 40, 135, 136, 78, 79, 61, 62, 2, 3, 848, 1, 4
+    # Ligas top
+    140,  # LaLiga
+    39,   # Premier
+    135,  # Serie A
+    78,   # Bundesliga
+    61,   # Ligue 1
+
+    # Segundas
+    141,  # LaLiga 2
+    40,   # Championship
+    136,  # Serie B
+    79,   # Bundesliga 2
+    62,   # Ligue 2
+
+    # Europa
+    2,    # Champions
+    3,    # Europa League
+    848,  # Conference League
+
+    # Internacional
+    1,    # World Cup
+    4     # Euro
 }
+
+def league_priority(league_id: int) -> int:
+    priority_map = {
+        # Máxima prioridad
+        2: 100,   # Champions
+        1: 98,    # World Cup
+        4: 97,    # Euro
+        3: 95,    # Europa League
+        848: 90,  # Conference League
+
+        # Ligas top
+        39: 85,   # Premier
+        140: 84,  # LaLiga
+        135: 83,  # Serie A
+        78: 82,   # Bundesliga
+        61: 81,   # Ligue 1
+
+        # Segundas
+        40: 70,   # Championship
+        141: 69,  # LaLiga 2
+        79: 68,   # Bundesliga 2
+        136: 67,  # Serie B
+        62: 66,   # Ligue 2
+    }
+    return priority_map.get(league_id, 10)
 
 def madrid_now() -> datetime:
     return datetime.now(pytz.timezone(TZ_NAME))
@@ -116,7 +162,13 @@ def get_upcoming_fixtures(days_ahead: int = 7) -> List[Dict[str, Any]]:
 
             fixtures.append(item)
 
-    fixtures.sort(key=lambda x: x.get("fixture", {}).get("date", ""))
+    fixtures.sort(
+        key=lambda x: (
+            league_priority(x.get("league", {}).get("id", 0)),
+            x.get("fixture", {}).get("date", "")
+        ),
+        reverse=True
+    )
     return fixtures
 
 def get_prediction(fixture_id: int) -> Optional[Dict[str, Any]]:
@@ -412,6 +464,7 @@ def build_candidate(
     fixture_id: int,
     competition: str,
     country: str,
+    league_id: int,
     match: str,
     starts_at: str,
     pick: str,
@@ -429,6 +482,8 @@ def build_candidate(
         "fixture_id": fixture_id,
         "competition": competition,
         "country": country,
+        "league_id": league_id,
+        "league_priority": league_priority(league_id),
         "match": match,
         "starts_at": starts_at,
         "pick": pick,
@@ -482,6 +537,7 @@ def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         starts_at = iso_to_local_hhmm(fixture["date"])
         competition = league.get("name")
         country = league.get("country")
+        league_id = league.get("id", 0)
         bookmaker = odds.get("bookmaker", "N/D")
 
         if valid_home:
@@ -489,7 +545,7 @@ def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
             edge = p_home - implied_home
             conf = confidence_from_edge(edge, p_home)
             candidate = build_candidate(
-                fixture_id, competition, country, match, starts_at,
+                fixture_id, competition, country, league_id, match, starts_at,
                 side_label("home", home_name, away_name), "home",
                 home_odds, p_home, implied_home, conf, pick_type, bookmaker,
                 build_tipster_explanation("home", home_reasons, p_home, implied_home, home_odds),
@@ -504,7 +560,7 @@ def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
             edge = p_away - implied_away
             conf = confidence_from_edge(edge, p_away)
             candidate = build_candidate(
-                fixture_id, competition, country, match, starts_at,
+                fixture_id, competition, country, league_id, match, starts_at,
                 side_label("away", home_name, away_name), "away",
                 away_odds, p_away, implied_away, conf, pick_type, bookmaker,
                 build_tipster_explanation("away", away_reasons, p_away, implied_away, away_odds),
@@ -514,8 +570,25 @@ def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
             if valid_by_type(pick_type, edge, p_away):
                 strong_candidates.append(candidate)
 
-    strong_candidates.sort(key=lambda x: (x["score"], x["value_edge"], x["model_probability"]), reverse=True)
-    fallback_candidates.sort(key=lambda x: (x["score"], x["model_probability"], x["odds"]), reverse=True)
+    strong_candidates.sort(
+        key=lambda x: (
+            x["league_priority"],
+            x["score"],
+            x["value_edge"],
+            x["model_probability"]
+        ),
+        reverse=True
+    )
+
+    fallback_candidates.sort(
+        key=lambda x: (
+            x["league_priority"],
+            x["score"],
+            x["model_probability"],
+            x["odds"]
+        ),
+        reverse=True
+    )
 
     return strong_candidates, fallback_candidates
 
@@ -538,7 +611,6 @@ def select_daily_picks(strong_candidates: List[Dict[str, Any]], fallback_candida
     take_best(medium)
     take_best(aggressive)
 
-    # Rellenar con fuertes
     for item in strong_candidates:
         if len(selected) >= 5:
             break
@@ -547,7 +619,6 @@ def select_daily_picks(strong_candidates: List[Dict[str, Any]], fallback_candida
         selected.append(item)
         used_fixtures.add(item["fixture_id"])
 
-    # Fallback si faltan picks
     for item in fallback_candidates:
         if len(selected) >= 5:
             break
@@ -578,7 +649,7 @@ def generate_real_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v4"}
+    return {"status": "ok", "service": "top-picks-backend-v5"}
 
 @app.get("/health")
 def health():
