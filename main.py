@@ -1,6 +1,7 @@
+import json
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pytz
 import requests
@@ -14,11 +15,9 @@ TZ_NAME = os.getenv("TZ", "Europe/Madrid")
 if not API_KEY:
     raise RuntimeError("Falta API_KEY en variables de entorno")
 
-HEADERS = {
-    "x-apisports-key": API_KEY,
-}
+HEADERS = {"x-apisports-key": API_KEY}
 
-app = FastAPI(title="Top Picks Backend", version="6.0.0")
+app = FastAPI(title="Top Picks Backend", version="8.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,28 +30,42 @@ app.add_middleware(
 CACHE_FILE = "daily_cache.json"
 
 TARGET_LEAGUES = {
-    140, 39, 135, 78, 61,      # top
-    141, 40, 136, 79, 62,      # second divisions
-    2, 3, 848,                 # Europe
-    1, 4                       # World Cup / Euro
+    # Top
+    140,  # LaLiga
+    39,   # Premier
+    135,  # Serie A
+    78,   # Bundesliga
+    61,   # Ligue 1
+
+    # Second divisions
+    141,  # LaLiga 2
+    40,   # Championship
+    136,  # Serie B
+    79,   # Bundesliga 2
+    62,   # Ligue 2
+
+    # Europe
+    2,    # Champions
+    3,    # Europa League
+    848,  # Conference League
+
+    # International
+    1,    # World Cup
+    4,    # Euro
 }
 
-def league_priority(league_id: int) -> int:
-    priority_map = {
-        2: 100, 1: 98, 4: 97, 3: 95, 848: 90,
-        39: 85, 140: 84, 135: 83, 78: 82, 61: 81,
-        40: 70, 141: 69, 79: 68, 136: 67, 62: 66,
-    }
-    return priority_map.get(league_id, 10)
+
+def log(*args: Any) -> None:
+    print("[TOP-PICKS]", *args, flush=True)
+
 
 def madrid_now() -> datetime:
     return datetime.now(pytz.timezone(TZ_NAME))
 
-def api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    url = f"{BASE_URL}{path}"
-    resp = requests.get(url, headers=HEADERS, params=params or {}, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+
+def clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
 
 def safe_float(v: Any) -> Optional[float]:
     try:
@@ -62,21 +75,60 @@ def safe_float(v: Any) -> Optional[float]:
     except Exception:
         return None
 
-def clamp(x: float, lo: float, hi: float) -> float:
-    return max(lo, min(hi, x))
 
 def implied_probability(odds: float) -> float:
     return 1.0 / odds if odds > 0 else 0.0
+
 
 def iso_to_local_hhmm(iso_str: str) -> str:
     dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
     return dt.astimezone(pytz.timezone(TZ_NAME)).strftime("%H:%M")
 
+
+def normalize_text(value: str) -> str:
+    return (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("-", " ")
+        .replace("_", " ")
+    )
+
+
+def league_priority(league_id: int) -> int:
+    priority_map = {
+        2: 100,   # Champions
+        1: 98,    # World Cup
+        4: 97,    # Euro
+        3: 95,    # Europa League
+        848: 90,  # Conference League
+
+        39: 85,   # Premier
+        140: 84,  # LaLiga
+        135: 83,  # Serie A
+        78: 82,   # Bundesliga
+        61: 81,   # Ligue 1
+
+        40: 70,   # Championship
+        141: 69,  # LaLiga 2
+        79: 68,   # Bundesliga 2
+        136: 67,  # Serie B
+        62: 66,   # Ligue 2
+    }
+    return priority_map.get(league_id, 10)
+
+
+def api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    url = f"{BASE_URL}{path}"
+    resp = requests.get(url, headers=HEADERS, params=params or {}, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def load_cache() -> Optional[Dict[str, Any]]:
     if not os.path.exists(CACHE_FILE):
         return None
     try:
-        import json
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         cached_until = data.get("cached_until")
@@ -89,13 +141,14 @@ def load_cache() -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+
 def save_cache(data: Dict[str, Any]) -> None:
     try:
-        import json
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
 
 def clear_cache() -> None:
     try:
@@ -104,13 +157,18 @@ def clear_cache() -> None:
     except Exception:
         pass
 
+
 def get_upcoming_fixtures(days_ahead: int = 7) -> List[Dict[str, Any]]:
     fixtures: List[Dict[str, Any]] = []
     now = madrid_now()
 
     for i in range(days_ahead):
         target_date = (now + timedelta(days=i)).strftime("%Y-%m-%d")
-        payload = api_get("/fixtures", {"date": target_date})
+        try:
+            payload = api_get("/fixtures", {"date": target_date})
+        except Exception as e:
+            log("Error consultando fixtures para", target_date, str(e))
+            continue
 
         for item in payload.get("response", []):
             league_id = item.get("league", {}).get("id")
@@ -123,9 +181,9 @@ def get_upcoming_fixtures(days_ahead: int = 7) -> List[Dict[str, Any]]:
                 continue
 
             try:
-                fixture_dt = datetime.fromisoformat(fixture_date_str.replace("Z", "+00:00")).astimezone(
-                    pytz.timezone(TZ_NAME)
-                )
+                fixture_dt = datetime.fromisoformat(
+                    fixture_date_str.replace("Z", "+00:00")
+                ).astimezone(pytz.timezone(TZ_NAME))
             except Exception:
                 continue
 
@@ -140,7 +198,10 @@ def get_upcoming_fixtures(days_ahead: int = 7) -> List[Dict[str, Any]]:
             x.get("fixture", {}).get("date", "")
         )
     )
+
+    log("Fixtures próximos encontrados:", len(fixtures))
     return fixtures
+
 
 def get_prediction(fixture_id: int) -> Optional[Dict[str, Any]]:
     try:
@@ -150,52 +211,25 @@ def get_prediction(fixture_id: int) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
-def normalize_text(value: str) -> str:
-    return (
-        str(value or "")
-        .strip()
-        .lower()
-        .replace("-", " ")
-        .replace("_", " ")
-    )
-
-def parse_selection_label(label: str) -> Optional[str]:
-    value = normalize_text(label)
-
-    if value in {"home", "1", "local", "team1", "equipo local"}:
-        return "home"
-    if value in {"away", "2", "visitante", "team2", "equipo visitante"}:
-        return "away"
-    if value in {"draw", "x", "empate"}:
-        return "draw"
-
-    # over/under
-    if "over" in value and "2.5" in value:
-        return "over_2_5"
-    if "under" in value and "2.5" in value:
-        return "under_2_5"
-
-    # btts
-    if value in {"yes", "si", "sí"}:
-        return "yes"
-    if value in {"no"}:
-        return "no"
-
-    return None
 
 def market_type_from_name(name: str) -> Optional[str]:
     n = normalize_text(name)
 
-    # winner
     winner_markets = {
-        "match winner", "winner", "1x2", "fulltime result",
-        "full time result", "match result", "final result",
-        "resultado final", "ganador del partido", "tiempo reglamentario",
+        "match winner",
+        "winner",
+        "1x2",
+        "fulltime result",
+        "full time result",
+        "match result",
+        "final result",
+        "resultado final",
+        "ganador del partido",
+        "tiempo reglamentario",
     }
-    if n in winner_markets or any(k in n for k in ["match winner", "fulltime result", "match result", "final result", "ganador"]):
+    if n in winner_markets or any(k in n for k in ["match winner", "match result", "final result", "ganador"]):
         return "winner"
 
-    # over under 2.5
     if (
         "over/under" in n
         or "goals over/under" in n
@@ -203,21 +237,47 @@ def market_type_from_name(name: str) -> Optional[str]:
         or "totals" in n
         or "más/menos" in n
         or "mas/menos" in n
-    ):
-        if "2.5" in n:
-            return "over_under_2_5"
+    ) and "2.5" in n:
+        return "over_2_5"
 
-    # btts
-    if n in {
-        "both teams to score",
-        "btts",
-        "gg/ng",
-        "ambos equipos marcan",
-        "both teams score"
-    } or "both teams" in n or "ambos" in n:
-        return "btts"
+    if (
+        n in {
+            "both teams to score",
+            "btts",
+            "gg/ng",
+            "ambos equipos marcan",
+            "both teams score",
+        }
+        or "both teams" in n
+        or "ambos" in n
+    ):
+        return "btts_yes"
 
     return None
+
+
+def parse_selection_label(label: str) -> Optional[str]:
+    v = normalize_text(label)
+
+    if v in {"home", "1", "local", "team1", "equipo local"}:
+        return "home"
+    if v in {"away", "2", "visitante", "team2", "equipo visitante"}:
+        return "away"
+    if v in {"draw", "x", "empate"}:
+        return "draw"
+
+    if "over" in v and "2.5" in v:
+        return "over_2_5"
+    if "under" in v and "2.5" in v:
+        return "under_2_5"
+
+    if v in {"yes", "si", "sí"}:
+        return "yes"
+    if v in {"no"}:
+        return "no"
+
+    return None
+
 
 def extract_markets_from_odds_item(odds_item: Dict[str, Any]) -> List[Dict[str, Any]]:
     bookmakers = odds_item.get("bookmakers", [])
@@ -225,7 +285,13 @@ def extract_markets_from_odds_item(odds_item: Dict[str, Any]) -> List[Dict[str, 
         return []
 
     preferred_bookmakers = [
-        "Bet365", "1xBet", "William Hill", "Bwin", "Unibet", "Marathonbet", "Pinnacle"
+        "Bet365",
+        "1xBet",
+        "William Hill",
+        "Bwin",
+        "Unibet",
+        "Marathonbet",
+        "Pinnacle",
     ]
 
     def bookmaker_rank(name: str) -> int:
@@ -235,9 +301,12 @@ def extract_markets_from_odds_item(odds_item: Dict[str, Any]) -> List[Dict[str, 
                 return idx
         return 999
 
-    found = []
+    found: List[Dict[str, Any]] = []
 
-    sorted_bookmakers = sorted(bookmakers, key=lambda b: bookmaker_rank(str(b.get("name", ""))))
+    sorted_bookmakers = sorted(
+        bookmakers,
+        key=lambda b: bookmaker_rank(str(b.get("name", "")))
+    )
 
     for bookmaker in sorted_bookmakers:
         bookmaker_name = str(bookmaker.get("name", "Bookmaker"))
@@ -250,6 +319,7 @@ def extract_markets_from_odds_item(odds_item: Dict[str, Any]) -> List[Dict[str, 
                 continue
 
             values_map: Dict[str, float] = {}
+
             for value in bet.get("values", []):
                 label = parse_selection_label(value.get("value", ""))
                 odd = safe_float(value.get("odd"))
@@ -266,12 +336,12 @@ def extract_markets_from_odds_item(odds_item: Dict[str, Any]) -> List[Dict[str, 
                         "values": {
                             "home": values_map["home"],
                             "away": values_map["away"],
-                            "draw": values_map.get("draw")
+                            "draw": values_map.get("draw"),
                         },
                         "bookmaker_rank": bookmaker_rank(bookmaker_name),
                     })
 
-            elif market_type == "over_under_2_5":
+            elif market_type == "over_2_5":
                 if "over_2_5" in values_map:
                     found.append({
                         "market_type": "over_2_5",
@@ -284,7 +354,7 @@ def extract_markets_from_odds_item(odds_item: Dict[str, Any]) -> List[Dict[str, 
                         "bookmaker_rank": bookmaker_rank(bookmaker_name),
                     })
 
-            elif market_type == "btts":
+            elif market_type == "btts_yes":
                 if "yes" in values_map:
                     found.append({
                         "market_type": "btts_yes",
@@ -297,9 +367,9 @@ def extract_markets_from_odds_item(odds_item: Dict[str, Any]) -> List[Dict[str, 
                         "bookmaker_rank": bookmaker_rank(bookmaker_name),
                     })
 
-    # priorizar mejor bookmaker
     found.sort(key=lambda x: x["bookmaker_rank"])
     return found
+
 
 def get_match_markets(fixture_id: int) -> List[Dict[str, Any]]:
     try:
@@ -307,16 +377,18 @@ def get_match_markets(fixture_id: int) -> List[Dict[str, Any]]:
         items = payload.get("response", [])
         if not items:
             return []
-        return extract_markets_from_odds_item(items[0])
+        markets = extract_markets_from_odds_item(items[0])
+        return markets
     except Exception:
         return []
+
 
 def get_last5_team_stats(team_id: int, home_context: bool) -> Dict[str, float]:
     try:
         payload = api_get("/fixtures", {
             "team": team_id,
             "last": 5,
-            "status": "FT"
+            "status": "FT",
         })
         items = payload.get("response", [])
 
@@ -337,7 +409,7 @@ def get_last5_team_stats(team_id: int, home_context: bool) -> Dict[str, float]:
         wins = 0
         clean = 0
         context_good = 0
-        goal_diffs = []
+        goal_diffs: List[float] = []
 
         for m in items:
             home_id = m["teams"]["home"]["id"]
@@ -389,16 +461,16 @@ def get_last5_team_stats(team_id: int, home_context: bool) -> Dict[str, float]:
             "consistency": 0.50,
         }
 
+
 def normalize_attack(x: float) -> float:
     return clamp(x / 2.5, 0.0, 1.0)
+
 
 def normalize_defense(x: float) -> float:
     return clamp(1.0 - (x / 2.5), 0.0, 1.0)
 
-def build_match_model(
-    fixture_item: Dict[str, Any],
-    prediction: Optional[Dict[str, Any]]
-) -> Dict[str, Any]:
+
+def build_match_model(fixture_item: Dict[str, Any], prediction: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     home_team = fixture_item["teams"]["home"]
     away_team = fixture_item["teams"]["away"]
 
@@ -446,15 +518,23 @@ def build_match_model(
     p_home = clamp(home_strength / total_strength, 0.05, 0.90)
     p_away = clamp(away_strength / total_strength, 0.05, 0.90)
 
-    avg_goals = (home_stats["goals_for"] + away_stats["goals_for"] + home_stats["goals_against"] + away_stats["goals_against"]) / 2.0
+    avg_goals = (
+        home_stats["goals_for"] +
+        away_stats["goals_for"] +
+        home_stats["goals_against"] +
+        away_stats["goals_against"]
+    ) / 2.0
+
     over25_prob = clamp((avg_goals - 1.8) / 2.0, 0.18, 0.82)
 
     home_scoring = clamp(home_stats["goals_for"] / 2.2, 0.15, 0.90)
     away_scoring = clamp(away_stats["goals_for"] / 2.2, 0.15, 0.90)
     btts_prob = clamp((home_scoring * away_scoring) + 0.20, 0.18, 0.82)
 
-    home_reasons = []
-    away_reasons = []
+    home_reasons: List[str] = []
+    away_reasons: List[str] = []
+    over_reasons: List[str] = []
+    btts_reasons: List[str] = []
 
     if home_stats["points_form"] > away_stats["points_form"]:
         home_reasons.append("mejor forma reciente")
@@ -476,7 +556,6 @@ def build_match_model(
     if away_stats["goals_against"] < home_stats["goals_against"]:
         away_reasons.append("más solidez defensiva")
 
-    over_reasons = []
     if avg_goals >= 2.5:
         over_reasons.append("promedio goleador alto")
     if home_stats["goals_for"] >= 1.4:
@@ -486,7 +565,6 @@ def build_match_model(
     if home_stats["goals_against"] >= 1.0 or away_stats["goals_against"] >= 1.0:
         over_reasons.append("defensas con margen para conceder")
 
-    btts_reasons = []
     if home_stats["goals_for"] >= 1.1:
         btts_reasons.append("el local suele marcar")
     if away_stats["goals_for"] >= 1.1:
@@ -503,7 +581,7 @@ def build_match_model(
     if not over_reasons:
         over_reasons = ["ritmo ofensivo razonable", "partido abierto", "contexto favorable al gol"]
     if not btts_reasons:
-        btts_reasons = ["dos ataques con capacidad de marcar", "defensas mejorables", "partido propenso a intercambio de goles"]
+        btts_reasons = ["dos ataques con capacidad de marcar", "defensas mejorables", "partido propenso al intercambio de goles"]
 
     return {
         "p_home": p_home,
@@ -516,12 +594,14 @@ def build_match_model(
         "btts_reasons": btts_reasons[:3],
     }
 
+
 def classify_pick_type(odds: float) -> str:
     if 1.45 <= odds <= 2.10:
         return "solido"
     if 2.10 < odds <= 3.50:
         return "medio"
     return "agresivo"
+
 
 def confidence_from_edge(edge: float, model_prob: float) -> str:
     if edge >= 0.10 and model_prob >= 0.55:
@@ -530,9 +610,11 @@ def confidence_from_edge(edge: float, model_prob: float) -> str:
         return "amarillo"
     return "rojo"
 
+
 def score_pick(edge: float, model_prob: float, pick_type: str) -> float:
     type_bonus = {"solido": 0.10, "medio": 0.08, "agresivo": 0.06}.get(pick_type, 0.0)
     return edge * 0.55 + model_prob * 0.25 + type_bonus
+
 
 def valid_by_type(pick_type: str, edge: float, model_prob: float) -> bool:
     if pick_type == "solido":
@@ -543,6 +625,7 @@ def valid_by_type(pick_type: str, edge: float, model_prob: float) -> bool:
         return edge >= -0.05 and model_prob >= 0.20
     return False
 
+
 def build_tipster_explanation(label: str, reasons: List[str], model_prob: float, implied_prob: float, odds: float) -> str:
     edge = round((model_prob - implied_prob) * 100, 1)
     joined = ", ".join(reasons[:3])
@@ -552,6 +635,7 @@ def build_tipster_explanation(label: str, reasons: List[str], model_prob: float,
         f"pero el modelo lo estima en {round(model_prob * 100, 1)}%. "
         f"Value estimado: {edge:+.1f}%."
     )
+
 
 def build_candidate(
     fixture_id: int,
@@ -594,10 +678,13 @@ def build_candidate(
         "score": round(score, 6),
     }
 
-def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+
+def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
     fixtures = get_upcoming_fixtures()
     strong_candidates: List[Dict[str, Any]] = []
     fallback_candidates: List[Dict[str, Any]] = []
+
+    fixtures_with_markets = 0
 
     for item in fixtures:
         fixture = item.get("fixture", {})
@@ -607,16 +694,21 @@ def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         if not fixture_id:
             continue
 
-        markets = get_match_markets(fixture_id)
-        if not markets:
-            continue
-
         prediction = get_prediction(fixture_id)
-        model = build_match_model(item, prediction)
+        markets = get_match_markets(fixture_id)
 
         home_name = teams["home"]["name"]
         away_name = teams["away"]["name"]
         match = f"{home_name} vs {away_name}"
+
+        log("Fixture:", fixture_id, match, "| markets:", len(markets))
+
+        if not markets:
+            continue
+
+        fixtures_with_markets += 1
+
+        model = build_match_model(item, prediction)
         starts_at = iso_to_local_hhmm(fixture["date"])
         competition = league.get("name")
         country = league.get("country")
@@ -625,8 +717,9 @@ def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         for market in markets:
             bookmaker = market["bookmaker"]
             market_name = market["market_name"]
+            market_type = market["market_type"]
 
-            if market["market_type"] == "winner":
+            if market_type == "winner":
                 home_odds = market["values"]["home"]
                 away_odds = market["values"]["away"]
 
@@ -664,7 +757,7 @@ def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
                     if valid_by_type(pick_type, edge, p):
                         strong_candidates.append(candidate)
 
-            elif market["market_type"] == "over_2_5":
+            elif market_type == "over_2_5":
                 over_odds = market["values"]["over_2_5"]
                 if over_odds and 1.45 <= over_odds <= 8.00:
                     p = model["p_over25"]
@@ -683,7 +776,7 @@ def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
                     if valid_by_type(pick_type, edge, p):
                         strong_candidates.append(candidate)
 
-            elif market["market_type"] == "btts_yes":
+            elif market_type == "btts_yes":
                 yes_odds = market["values"]["yes"]
                 if yes_odds and 1.45 <= yes_odds <= 8.00:
                     p = model["p_btts_yes"]
@@ -722,18 +815,26 @@ def get_candidates() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         reverse=True
     )
 
-    return strong_candidates, fallback_candidates
+    log("Fixtures con markets:", fixtures_with_markets)
+    log("Strong candidates:", len(strong_candidates))
+    log("Fallback candidates:", len(fallback_candidates))
+
+    return {
+        "strong": strong_candidates,
+        "fallback": fallback_candidates,
+    }
+
 
 def select_daily_picks(strong_candidates: List[Dict[str, Any]], fallback_candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     selected: List[Dict[str, Any]] = []
-    used_fixture_market = set()
+    used_keys = set()
 
     def add_candidate(item: Dict[str, Any]) -> bool:
         key = (item["fixture_id"], item["market_group"])
-        if key in used_fixture_market:
+        if key in used_keys:
             return False
         selected.append(item)
-        used_fixture_market.add(key)
+        used_keys.add(key)
         return True
 
     solid = [c for c in strong_candidates if c["type"] == "solido"]
@@ -757,8 +858,12 @@ def select_daily_picks(strong_candidates: List[Dict[str, Any]], fallback_candida
 
     return selected[:5]
 
+
 def generate_real_picks() -> Dict[str, Any]:
-    strong_candidates, fallback_candidates = get_candidates()
+    candidates = get_candidates()
+    strong_candidates = candidates["strong"]
+    fallback_candidates = candidates["fallback"]
+
     picks = select_daily_picks(strong_candidates, fallback_candidates)
 
     now = madrid_now()
@@ -770,18 +875,22 @@ def generate_real_picks() -> Dict[str, Any]:
         "cached_until": cached_until.isoformat(),
         "source": "API-FOOTBALL real fixtures + odds + predictions",
         "count": len(picks),
-        "picks": picks
+        "picks": picks,
     }
+
     save_cache(data)
     return data
 
+
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v6"}
+    return {"status": "ok", "service": "top-picks-backend-v8"}
+
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
 
 @app.get("/top-picks-today")
 def top_picks_today(refresh: int = Query(default=0)):
