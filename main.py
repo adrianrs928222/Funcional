@@ -17,7 +17,7 @@ if not API_KEY:
 
 HEADERS = {"x-apisports-key": API_KEY}
 
-app = FastAPI(title="Top Picks Backend", version="8.1.0")
+app = FastAPI(title="Top Picks Backend", version="8.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,10 +30,28 @@ app.add_middleware(
 CACHE_FILE = "daily_cache.json"
 
 TARGET_LEAGUES = {
-    140, 39, 135, 78, 61,      # top
-    141, 40, 136, 79, 62,      # second divisions
-    2, 3, 848,                 # Europe
-    1, 4                       # World Cup / Euro
+    # Top
+    140,  # LaLiga
+    39,   # Premier
+    135,  # Serie A
+    78,   # Bundesliga
+    61,   # Ligue 1
+
+    # Segundas
+    141,  # LaLiga 2
+    40,   # Championship
+    136,  # Serie B
+    79,   # Bundesliga 2
+    62,   # Ligue 2
+
+    # Europa
+    2,    # Champions
+    3,    # Europa League
+    848,  # Conference League
+
+    # Internacional
+    1,    # World Cup
+    4,    # Euro
 }
 
 
@@ -142,6 +160,7 @@ def clear_cache() -> None:
 def get_upcoming_fixtures(days_ahead: int = 7) -> List[Dict[str, Any]]:
     fixtures: List[Dict[str, Any]] = []
     now = madrid_now()
+    today_str = now.strftime("%Y-%m-%d")
 
     for i in range(days_ahead):
         target_date = (now + timedelta(days=i)).strftime("%Y-%m-%d")
@@ -158,6 +177,8 @@ def get_upcoming_fixtures(days_ahead: int = 7) -> List[Dict[str, Any]]:
 
             if league_id not in TARGET_LEAGUES:
                 continue
+
+            # Solo prepartido
             if status_short not in {"NS", "TBD"}:
                 continue
 
@@ -168,7 +189,11 @@ def get_upcoming_fixtures(days_ahead: int = 7) -> List[Dict[str, Any]]:
             except Exception:
                 continue
 
-            if fixture_dt <= now:
+            fixture_day_str = fixture_dt.strftime("%Y-%m-%d")
+
+            # Permitir partidos de hoy aunque ya hayan pasado unas horas del día,
+            # pero sin incluir partidos live porque ya filtramos por NS/TBD.
+            if fixture_day_str != today_str and fixture_dt <= now:
                 continue
 
             fixtures.append(item)
@@ -876,7 +901,7 @@ def generate_real_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v8.1"}
+    return {"status": "ok", "service": "top-picks-backend-v8.2"}
 
 
 @app.get("/health")
