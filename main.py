@@ -17,7 +17,7 @@ if not API_KEY:
 
 HEADERS = {"x-apisports-key": API_KEY}
 
-app = FastAPI(title="Top Picks Backend", version="8.0.0")
+app = FastAPI(title="Top Picks Backend", version="8.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,28 +30,10 @@ app.add_middleware(
 CACHE_FILE = "daily_cache.json"
 
 TARGET_LEAGUES = {
-    # Top
-    140,  # LaLiga
-    39,   # Premier
-    135,  # Serie A
-    78,   # Bundesliga
-    61,   # Ligue 1
-
-    # Second divisions
-    141,  # LaLiga 2
-    40,   # Championship
-    136,  # Serie B
-    79,   # Bundesliga 2
-    62,   # Ligue 2
-
-    # Europe
-    2,    # Champions
-    3,    # Europa League
-    848,  # Conference League
-
-    # International
-    1,    # World Cup
-    4,    # Euro
+    140, 39, 135, 78, 61,      # top
+    141, 40, 136, 79, 62,      # second divisions
+    2, 3, 848,                 # Europe
+    1, 4                       # World Cup / Euro
 }
 
 
@@ -92,28 +74,27 @@ def normalize_text(value: str) -> str:
         .lower()
         .replace("-", " ")
         .replace("_", " ")
+        .replace("/", " ")
     )
 
 
 def league_priority(league_id: int) -> int:
     priority_map = {
-        2: 100,   # Champions
-        1: 98,    # World Cup
-        4: 97,    # Euro
-        3: 95,    # Europa League
-        848: 90,  # Conference League
-
-        39: 85,   # Premier
-        140: 84,  # LaLiga
-        135: 83,  # Serie A
-        78: 82,   # Bundesliga
-        61: 81,   # Ligue 1
-
-        40: 70,   # Championship
-        141: 69,  # LaLiga 2
-        79: 68,   # Bundesliga 2
-        136: 67,  # Serie B
-        62: 66,   # Ligue 2
+        2: 100,
+        1: 98,
+        4: 97,
+        3: 95,
+        848: 90,
+        39: 85,
+        140: 84,
+        135: 83,
+        78: 82,
+        61: 81,
+        40: 70,
+        141: 69,
+        79: 68,
+        136: 67,
+        62: 66,
     }
     return priority_map.get(league_id, 10)
 
@@ -215,7 +196,7 @@ def get_prediction(fixture_id: int) -> Optional[Dict[str, Any]]:
 def market_type_from_name(name: str) -> Optional[str]:
     n = normalize_text(name)
 
-    winner_markets = {
+    winner_keywords = [
         "match winner",
         "winner",
         "1x2",
@@ -226,31 +207,33 @@ def market_type_from_name(name: str) -> Optional[str]:
         "resultado final",
         "ganador del partido",
         "tiempo reglamentario",
-    }
-    if n in winner_markets or any(k in n for k in ["match winner", "match result", "final result", "ganador"]):
+        "resultado",
+    ]
+    if any(k in n for k in winner_keywords):
         return "winner"
 
-    if (
-        "over/under" in n
-        or "goals over/under" in n
-        or "total goals" in n
-        or "totals" in n
-        or "más/menos" in n
-        or "mas/menos" in n
-    ) and "2.5" in n:
+    over_keywords = [
+        "over under",
+        "goals over under",
+        "total goals",
+        "totals",
+        "más menos",
+        "mas menos",
+        "goals o u",
+    ]
+    if any(k in n for k in over_keywords) and "2.5" in n:
         return "over_2_5"
 
-    if (
-        n in {
-            "both teams to score",
-            "btts",
-            "gg/ng",
-            "ambos equipos marcan",
-            "both teams score",
-        }
-        or "both teams" in n
-        or "ambos" in n
-    ):
+    btts_keywords = [
+        "both teams to score",
+        "btts",
+        "gg ng",
+        "ambos equipos marcan",
+        "both teams score",
+        "both teams",
+        "ambos marcan",
+    ]
+    if any(k in n for k in btts_keywords):
         return "btts_yes"
 
     return None
@@ -259,21 +242,31 @@ def market_type_from_name(name: str) -> Optional[str]:
 def parse_selection_label(label: str) -> Optional[str]:
     v = normalize_text(label)
 
-    if v in {"home", "1", "local", "team1", "equipo local"}:
+    if v in {
+        "home", "1", "local", "team1", "equipo local",
+        "home team", "host", "domicile"
+    }:
         return "home"
-    if v in {"away", "2", "visitante", "team2", "equipo visitante"}:
+
+    if v in {
+        "away", "2", "visitante", "team2", "equipo visitante",
+        "away team", "guest"
+    }:
         return "away"
+
     if v in {"draw", "x", "empate"}:
         return "draw"
 
-    if "over" in v and "2.5" in v:
+    if ("over" in v or "more" in v or "mas" in v or "más" in v) and "2.5" in v:
         return "over_2_5"
-    if "under" in v and "2.5" in v:
+
+    if ("under" in v or "less" in v or "menos" in v) and "2.5" in v:
         return "under_2_5"
 
-    if v in {"yes", "si", "sí"}:
+    if v in {"yes", "si", "sí", "y", "gg"}:
         return "yes"
-    if v in {"no"}:
+
+    if v in {"no", "n", "ng"}:
         return "no"
 
     return None
@@ -377,8 +370,7 @@ def get_match_markets(fixture_id: int) -> List[Dict[str, Any]]:
         items = payload.get("response", [])
         if not items:
             return []
-        markets = extract_markets_from_odds_item(items[0])
-        return markets
+        return extract_markets_from_odds_item(items[0])
     except Exception:
         return []
 
@@ -884,12 +876,151 @@ def generate_real_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v8"}
+    return {"status": "ok", "service": "top-picks-backend-v8.1"}
 
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/debug-top-picks")
+def debug_top_picks():
+    try:
+        fixtures = get_upcoming_fixtures()
+        summary = {
+            "fixtures_found": len(fixtures),
+            "fixtures_with_markets": 0,
+            "strong_candidates": 0,
+            "fallback_candidates": 0,
+            "fixture_samples": [],
+            "market_samples": [],
+        }
+
+        strong_candidates = []
+        fallback_candidates = []
+
+        for item in fixtures[:25]:
+            fixture = item.get("fixture", {})
+            league = item.get("league", {})
+            teams = item.get("teams", {})
+            fixture_id = fixture.get("id")
+
+            if not fixture_id:
+                continue
+
+            match = f'{teams.get("home", {}).get("name", "?")} vs {teams.get("away", {}).get("name", "?")}'
+            markets = get_match_markets(fixture_id)
+
+            summary["fixture_samples"].append({
+                "fixture_id": fixture_id,
+                "match": match,
+                "league": league.get("name"),
+                "markets_found": len(markets),
+            })
+
+            if not markets:
+                continue
+
+            summary["fixtures_with_markets"] += 1
+
+            for market in markets[:3]:
+                summary["market_samples"].append({
+                    "fixture_id": fixture_id,
+                    "match": match,
+                    "market_type": market.get("market_type"),
+                    "market_name": market.get("market_name"),
+                    "bookmaker": market.get("bookmaker"),
+                    "values": market.get("values"),
+                })
+
+            prediction = get_prediction(fixture_id)
+            model = build_match_model(item, prediction)
+
+            for market in markets:
+                market_type = market["market_type"]
+
+                if market_type == "winner":
+                    home_odds = market["values"].get("home")
+                    away_odds = market["values"].get("away")
+
+                    if home_odds and 1.45 <= home_odds <= 8.00:
+                        p = model["p_home"]
+                        imp = implied_probability(home_odds)
+                        edge = p - imp
+                        pick_type = classify_pick_type(home_odds)
+                        fallback_candidates.append({
+                            "match": match,
+                            "pick": f'Gana {teams["home"]["name"]}',
+                            "odds": home_odds,
+                            "edge": round(edge * 100, 2),
+                            "model_prob": round(p * 100, 2),
+                            "market_type": market_type,
+                        })
+                        if valid_by_type(pick_type, edge, p):
+                            strong_candidates.append(fallback_candidates[-1])
+
+                    if away_odds and 1.45 <= away_odds <= 8.00:
+                        p = model["p_away"]
+                        imp = implied_probability(away_odds)
+                        edge = p - imp
+                        pick_type = classify_pick_type(away_odds)
+                        fallback_candidates.append({
+                            "match": match,
+                            "pick": f'Gana {teams["away"]["name"]}',
+                            "odds": away_odds,
+                            "edge": round(edge * 100, 2),
+                            "model_prob": round(p * 100, 2),
+                            "market_type": market_type,
+                        })
+                        if valid_by_type(pick_type, edge, p):
+                            strong_candidates.append(fallback_candidates[-1])
+
+                elif market_type == "over_2_5":
+                    over_odds = market["values"].get("over_2_5")
+                    if over_odds and 1.45 <= over_odds <= 8.00:
+                        p = model["p_over25"]
+                        imp = implied_probability(over_odds)
+                        edge = p - imp
+                        pick_type = classify_pick_type(over_odds)
+                        fallback_candidates.append({
+                            "match": match,
+                            "pick": "Más de 2.5 goles",
+                            "odds": over_odds,
+                            "edge": round(edge * 100, 2),
+                            "model_prob": round(p * 100, 2),
+                            "market_type": market_type,
+                        })
+                        if valid_by_type(pick_type, edge, p):
+                            strong_candidates.append(fallback_candidates[-1])
+
+                elif market_type == "btts_yes":
+                    yes_odds = market["values"].get("yes")
+                    if yes_odds and 1.45 <= yes_odds <= 8.00:
+                        p = model["p_btts_yes"]
+                        imp = implied_probability(yes_odds)
+                        edge = p - imp
+                        pick_type = classify_pick_type(yes_odds)
+                        fallback_candidates.append({
+                            "match": match,
+                            "pick": "Ambos marcan: Sí",
+                            "odds": yes_odds,
+                            "edge": round(edge * 100, 2),
+                            "model_prob": round(p * 100, 2),
+                            "market_type": market_type,
+                        })
+                        if valid_by_type(pick_type, edge, p):
+                            strong_candidates.append(fallback_candidates[-1])
+
+        summary["strong_candidates"] = len(strong_candidates)
+        summary["fallback_candidates"] = len(fallback_candidates)
+        summary["strong_preview"] = strong_candidates[:5]
+        summary["fallback_preview"] = fallback_candidates[:5]
+
+        return summary
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Debug error: {str(e)}")
 
 
 @app.get("/top-picks-today")
