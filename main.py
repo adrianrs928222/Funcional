@@ -24,15 +24,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-LOOKAHEAD_HOURS = 48
-MAX_MATCHES_PER_COMP = 6
-MAX_PICKS = 10
+LOOKAHEAD_HOURS = 72
+MAX_MATCHES = 10
 
-COMPETITIONS = {
-    "PD": "LaLiga",
-    "SD": "Segunda División",
-    "CL": "Champions League",
-}
+LEAGUE_CODE = "PD"
+LEAGUE_NAME = "LaLiga"
 
 TEAM_RATINGS = {
     "Real Madrid CF": 93,
@@ -45,30 +41,6 @@ TEAM_RATINGS = {
     "Girona FC": 80,
     "Valencia CF": 77,
     "Sevilla FC": 78,
-
-    "RCD Espanyol de Barcelona": 77,
-    "Levante UD": 75,
-    "Real Zaragoza": 73,
-    "Real Sporting de Gijón": 73,
-    "Real Oviedo": 74,
-    "Elche CF": 75,
-    "CD Tenerife": 71,
-    "Cádiz CF": 75,
-    "SD Eibar": 74,
-
-    "Manchester City FC": 94,
-    "Arsenal FC": 91,
-    "Liverpool FC": 91,
-    "FC Bayern München": 92,
-    "Borussia Dortmund": 86,
-    "Paris Saint-Germain FC": 91,
-    "FC Internazionale Milano": 90,
-    "Juventus FC": 86,
-    "AC Milan": 86,
-    "SSC Napoli": 84,
-    "SL Benfica": 84,
-    "FC Porto": 83,
-    "PSV": 85,
 }
 
 def now_local() -> datetime:
@@ -79,7 +51,12 @@ def parse_iso_to_local(value: str) -> datetime:
 
 def api_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
     headers = {"X-Auth-Token": API_KEY}
-    r = requests.get(f"{BASE_URL}{path}", headers=headers, params=params, timeout=10)
+    r = requests.get(
+        f"{BASE_URL}{path}",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
     r.raise_for_status()
     return r.json()
 
@@ -92,63 +69,59 @@ def stable_team_rating(team_name: str) -> float:
 def get_matches() -> List[Dict[str, Any]]:
     start = now_local()
     end = now_local() + timedelta(hours=LOOKAHEAD_HOURS)
+
     out: List[Dict[str, Any]] = []
 
-    for code, league_name in COMPETITIONS.items():
+    data = api_get(
+        f"/competitions/{LEAGUE_CODE}/matches",
+        {
+            "dateFrom": start.date().isoformat(),
+            "dateTo": end.date().isoformat(),
+        },
+    )
+
+    matches = (data.get("matches") or [])[:MAX_MATCHES]
+
+    for m in matches:
         try:
-            data = api_get(
-                f"/competitions/{code}/matches",
-                {
-                    "dateFrom": start.date().isoformat(),
-                    "dateTo": end.date().isoformat(),
-                },
-            )
-            matches = (data.get("matches") or [])[:MAX_MATCHES_PER_COMP]
-        except Exception as e:
-            print(f"ERROR {code}: {e}")
+            utc_date = m["utcDate"]
+            home = m["homeTeam"]["name"]
+            away = m["awayTeam"]["name"]
+            dt_local = parse_iso_to_local(utc_date)
+        except Exception:
             continue
 
-        for m in matches:
-            try:
-                utc_date = m["utcDate"]
-                home = m["homeTeam"]["name"]
-                away = m["awayTeam"]["name"]
-                dt_local = parse_iso_to_local(utc_date)
-            except Exception:
-                continue
+        if not (start <= dt_local <= end):
+            continue
 
-            if not (start <= dt_local <= end):
-                continue
-
-            out.append({
-                "id": m.get("id"),
-                "league": league_name,
-                "home_team": home,
-                "away_team": away,
-                "dt_local": dt_local,
-            })
+        out.append({
+            "id": m.get("id"),
+            "match": f"{home} vs {away}",
+            "league": LEAGUE_NAME,
+            "home_team": home,
+            "away_team": away,
+            "dt_local": dt_local,
+        })
 
     return out
 
-def predict_cards(league: str, hs: float, aws: float, home: str, away: str) -> Dict[str, int]:
-    base_cards = {
-        "LaLiga": 5,
-        "Segunda División": 6,
-        "Champions League": 4,
-    }
-    total = base_cards.get(league, 5)
+def predict_cards(home_strength: float, away_strength: float, home: str, away: str):
+    total = 5
 
-    if hs > aws:
+    if home_strength > away_strength:
         away_cards = min(total - 1, max(2, round(total * 0.58)))
         home_cards = total - away_cards
-    elif aws > hs:
+    elif away_strength > home_strength:
         home_cards = min(total - 1, max(2, round(total * 0.58)))
         away_cards = total - home_cards
     else:
         home_cards = total // 2
         away_cards = total - home_cards
 
-    return {home: int(home_cards), away: int(away_cards)}
+    return {
+        home: int(home_cards),
+        away: int(away_cards)
+    }
 
 def estimate_odds_from_confidence(confidence: int, pick_type: str) -> float:
     if pick_type == "winner":
@@ -169,19 +142,18 @@ def odds_band(odds: float) -> str:
 def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
     home = match["home_team"]
     away = match["away_team"]
-    league = match["league"]
 
-    hs = stable_team_rating(home) + 3.2
-    aws = stable_team_rating(away)
+    home_strength = stable_team_rating(home) + 3.2
+    away_strength = stable_team_rating(away)
 
-    diff = hs - aws
+    diff = home_strength - away_strength
     abs_diff = abs(diff)
 
     home_xg = max(0.55, min(1.20 + diff * 0.035, 2.80))
     away_xg = max(0.40, min(1.00 - diff * 0.022, 2.30))
     total_xg = home_xg + away_xg
 
-    winner = home if hs >= aws else away
+    winner = home if home_strength >= away_strength else away
     btts = "Sí" if home_xg >= 1.0 and away_xg >= 0.9 and abs_diff < 7.5 else "No"
     over = "Sí" if total_xg >= 2.60 else "No"
 
@@ -215,10 +187,10 @@ def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
 
     odds = estimate_odds_from_confidence(best["confidence"], best["pick_type"])
     band = odds_band(odds)
-    cards = predict_cards(league, hs, aws, home, away)
+    cards = predict_cards(home_strength, away_strength, home, away)
 
     explanation = (
-        f"{league}: {home} vs {away}. "
+        f"{LEAGUE_NAME}: {home} vs {away}. "
         f"Ganador estimado: {winner}. "
         f"Proyección ofensiva aproximada: {home_xg:.2f} - {away_xg:.2f} xG. "
         f"BTTS: {btts}. Over 2.5: {over}. "
@@ -228,8 +200,8 @@ def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "id": match["id"],
-        "match": f"{home} vs {away}",
-        "league": league,
+        "match": match["match"],
+        "league": match["league"],
         "time_local": match["dt_local"].strftime("%d/%m %H:%M"),
         "pick": best["pick"],
         "pick_type": best["pick_type"],
@@ -252,7 +224,7 @@ def build_picks() -> List[Dict[str, Any]]:
     picks = [build_pick(m) for m in matches]
     picks = [p for p in picks if p["confidence"] >= 72]
     picks.sort(key=lambda x: (x["confidence"], x["odds_estimate"]), reverse=True)
-    return picks[:MAX_PICKS]
+    return picks[:MAX_MATCHES]
 
 def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
     eligible = [p for p in picks if p["confidence"] >= 80]
@@ -320,7 +292,7 @@ def picks(force_refresh: bool = False):
         picks = build_picks()
         return {
             "generated_at": now_local().isoformat(),
-            "cache_day": today_key(),
+            "cache_day": now_local().strftime("%Y-%m-%d"),
             "lookahead_hours": LOOKAHEAD_HOURS,
             "count": len(picks),
             "picks": picks,
