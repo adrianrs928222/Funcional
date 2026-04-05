@@ -15,7 +15,7 @@ TZ_NAME = os.getenv("TZ", "Europe/Madrid")
 if not ODDS_API_KEY:
     raise RuntimeError("Falta ODDS_API_KEY en variables de entorno")
 
-app = FastAPI(title="Top Picks Backend", version="14.0.0")
+app = FastAPI(title="Top Picks Backend", version="15.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -257,6 +257,7 @@ def get_today_fixtures() -> List[Dict[str, Any]]:
             except Exception:
                 continue
 
+            # solo hoy
             if dt.strftime("%Y-%m-%d") != today_str:
                 continue
 
@@ -425,7 +426,28 @@ def score_pick(edge: float, model_prob: float, pick_type: str) -> float:
 
 
 def valid_band(odds: float) -> bool:
-    return 1.75 <= odds <= 4.50
+    return 1.65 <= odds <= 4.80
+
+
+def candidate_quality_tier(candidate: Dict[str, Any]) -> str:
+    odds = float(candidate.get("odds", 0))
+    edge = float(candidate.get("value_edge", 0))
+    model_prob = float(candidate.get("model_probability", 0)) / 100.0
+    confidence = str(candidate.get("confidence", "")).lower()
+
+    if edge >= 5.0 and model_prob >= 0.50 and 1.70 <= odds <= 3.60:
+        return "A"
+
+    if edge >= 2.0 and model_prob >= 0.45 and 1.65 <= odds <= 4.20:
+        return "B"
+
+    if edge >= -1.5 and model_prob >= 0.40 and 1.65 <= odds <= 4.80:
+        return "C"
+
+    if confidence in {"verde", "amarillo"} and 1.65 <= odds <= 4.80:
+        return "D"
+
+    return "Z"
 
 
 def build_tipster_explanation(label: str, reasons: List[str], model_prob: float, implied_prob_: float, odds: float) -> str:
@@ -588,30 +610,61 @@ def select_daily_picks(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     selected: List[Dict[str, Any]] = []
     used_fixtures = set()
 
-    media = [c for c in candidates if c["type"] == "medio"]
-    alta = [c for c in candidates if c["type"] == "agresivo"]
+    def can_add(item: Dict[str, Any]) -> bool:
+        return item["fixture_id"] not in used_fixtures
 
-    def add_group(group: List[Dict[str, Any]], limit: int) -> None:
-        for item in group:
-            if len(selected) >= 5:
-                return
-            if item["fixture_id"] in used_fixtures:
-                continue
-            selected.append(item)
-            used_fixtures.add(item["fixture_id"])
-            if len([x for x in selected if x["type"] == item["type"]]) >= limit:
-                break
-
-    add_group(media, 3)
-    add_group(alta, 2)
-
-    for item in candidates:
-        if len(selected) >= 5:
-            break
-        if item["fixture_id"] in used_fixtures:
-            continue
+    def add_item(item: Dict[str, Any]) -> bool:
+        if not can_add(item):
+            return False
         selected.append(item)
         used_fixtures.add(item["fixture_id"])
+        return True
+
+    tier_a = [c for c in candidates if candidate_quality_tier(c) == "A"]
+    tier_b = [c for c in candidates if candidate_quality_tier(c) == "B"]
+    tier_c = [c for c in candidates if candidate_quality_tier(c) == "C"]
+    tier_d = [c for c in candidates if candidate_quality_tier(c) == "D"]
+
+    def sort_key(x: Dict[str, Any]):
+        return (
+            x.get("league_priority", 0),
+            x.get("score", 0),
+            x.get("value_edge", 0),
+            x.get("odds", 0),
+        )
+
+    tier_a.sort(key=sort_key, reverse=True)
+    tier_b.sort(key=sort_key, reverse=True)
+    tier_c.sort(key=sort_key, reverse=True)
+    tier_d.sort(key=sort_key, reverse=True)
+
+    for item in tier_a:
+        if len(selected) >= 2:
+            break
+        add_item(item)
+
+    for item in tier_b:
+        if len(selected) >= 4:
+            break
+        add_item(item)
+
+    for item in tier_c:
+        if len(selected) >= 5:
+            break
+        add_item(item)
+
+    remainder = tier_a + tier_b + tier_c + tier_d
+    for item in remainder:
+        if len(selected) >= 5:
+            break
+        add_item(item)
+
+    if len(selected) < 5:
+        all_sorted = sorted(candidates, key=sort_key, reverse=True)
+        for item in all_sorted:
+            if len(selected) >= 5:
+                break
+            add_item(item)
 
     return selected[:5]
 
@@ -774,7 +827,7 @@ def generate_daily_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v14"}
+    return {"status": "ok", "service": "top-picks-backend-v15"}
 
 
 @app.get("/health")
@@ -808,6 +861,7 @@ def history_picks():
 
 @app.get("/top-picks-today")
 def top_picks_today(refresh: int = Query(default=0)):
+    # refresh se ignora a propósito para no cambiar los picks del día
     cached = load_cache()
     if cached:
         return cached
