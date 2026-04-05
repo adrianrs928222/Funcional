@@ -15,7 +15,7 @@ TZ_NAME = os.getenv("TZ", "Europe/Madrid")
 if not ODDS_API_KEY:
     raise RuntimeError("Falta ODDS_API_KEY en variables de entorno")
 
-app = FastAPI(title="Top Picks Backend", version="19.0.0")
+app = FastAPI(title="Top Picks Backend", version="20.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -65,6 +65,10 @@ BOOKMAKER_PRIORITY = [
 ]
 
 REGIONS = "uk,eu"
+
+# Ventana de partidos cercanos
+LOOKBACK_HOURS = 3
+LOOKAHEAD_HOURS = 18
 
 
 def log(*args: Any) -> None:
@@ -192,7 +196,6 @@ def fetch_events_for_sport(sport_key: str) -> List[Dict[str, Any]]:
 
     for alias in aliases:
         try:
-            # h2h casi siempre disponible
             data = odds_api_get(
                 f"/v4/sports/{alias}/odds",
                 {
@@ -232,9 +235,8 @@ def fetch_scores_for_sport(sport_key: str, days_from: int = 3) -> List[Dict[str,
     return []
 
 
-def get_today_fixtures() -> List[Dict[str, Any]]:
+def get_nearby_fixtures() -> List[Dict[str, Any]]:
     now = madrid_now()
-    today_str = now.strftime("%Y-%m-%d")
 
     events: List[Dict[str, Any]] = []
     seen = set()
@@ -257,19 +259,29 @@ def get_today_fixtures() -> List[Dict[str, Any]]:
             except Exception:
                 continue
 
-            if dt.strftime("%Y-%m-%d") != today_str:
+            # filtro por proximidad, no por fecha exacta
+            if dt < now - timedelta(hours=LOOKBACK_HOURS):
                 continue
 
-            # evita live, pero deja margen por si la API retrasa horas
-            if dt <= now - timedelta(hours=2):
+            if dt > now + timedelta(hours=LOOKAHEAD_HOURS):
                 continue
 
             item["_priority"] = sport_priority(item.get("sport_key", ""))
+            item["_local_dt"] = dt.isoformat()
             events.append(item)
             seen.add(event_id)
 
-    events.sort(key=lambda x: (-x.get("_priority", 10), x.get("commence_time", "")))
-    log("Fixtures de hoy encontrados:", len(events))
+    events.sort(
+        key=lambda x: (
+            -x.get("_priority", 10),
+            x.get("_local_dt", "")
+        )
+    )
+
+    log("Fixtures cercanos encontrados:", len(events))
+    for e in events[:5]:
+        log("DEBUG MATCH:", e.get("home_team"), "vs", e.get("away_team"), e.get("commence_time"))
+
     return events
 
 
@@ -335,11 +347,9 @@ def build_market_consensus(event: Dict[str, Any]) -> Dict[str, float]:
 
     balance = 1.0 - abs(p_home - p_away)
 
-    # sintéticos para que no dependa de markets escasos
     p_over25 = clamp(0.44 + (balance * 0.18), 0.30, 0.74)
     p_btts_yes = clamp(0.40 + (balance * 0.18), 0.28, 0.74)
 
-    # cuotas sintéticas razonables
     odds_over25 = clamp(round(1 / max(p_over25 - 0.03, 0.20), 2), 1.55, 3.80)
     odds_btts_yes = clamp(round(1 / max(p_btts_yes - 0.03, 0.20), 2), 1.55, 3.80)
 
@@ -357,7 +367,7 @@ def build_market_consensus(event: Dict[str, Any]) -> Dict[str, float]:
 def build_reasons(side: str) -> List[str]:
     if side == "home":
         return [
-            "llega mejor perfilado para mandar en los momentos importantes",
+            "llega mejor perfilado para mandar en momentos importantes",
             "el cruce le favorece bastante",
             "tiene argumentos para imponerse",
         ]
@@ -426,7 +436,7 @@ def build_tipster_explanation(label: str, reasons: List[str], odds: float, marke
     if market_group == "winner":
         return (
             f"{label} entra porque {joined}. "
-            f"Cuota {round(odds, 2)} interesante para el partido de hoy y con contexto suficiente para meterse entre los destacados."
+            f"Cuota {round(odds, 2)} interesante para este tramo del día y con contexto suficiente para meterse entre los destacados."
         )
 
     if market_group == "over_2_5":
@@ -438,7 +448,7 @@ def build_tipster_explanation(label: str, reasons: List[str], odds: float, marke
     if market_group == "btts_yes":
         return (
             f"{label} entra porque {joined}. "
-            f"Es de esos cruces donde cuesta imaginar a alguno de los dos sin generar daño arriba."
+            f"Es un cruce donde cuesta imaginar a alguno de los dos sin generar daño arriba."
         )
 
     return f"{label} entra porque {joined}."
@@ -489,7 +499,7 @@ def build_candidate(
 
 
 def get_candidates() -> List[Dict[str, Any]]:
-    events = get_today_fixtures()
+    events = get_nearby_fixtures()
     candidates: List[Dict[str, Any]] = []
 
     for event in events:
@@ -529,11 +539,8 @@ def get_candidates() -> List[Dict[str, Any]]:
                     build_candidate(
                         event, competition, match, starts_at,
                         f"Gana {home_name}", "winner",
-                        home_odds, p, imp,
-                        confidence_from_edge(edge, p),
-                        pick_type,
-                        h2h_market["bookmaker"],
-                        "h2h",
+                        home_odds, p, imp, confidence_from_edge(edge, p), pick_type,
+                        h2h_market["bookmaker"], "h2h",
                         build_tipster_explanation(
                             f"Gana {home_name}",
                             build_reasons("home"),
@@ -554,11 +561,8 @@ def get_candidates() -> List[Dict[str, Any]]:
                     build_candidate(
                         event, competition, match, starts_at,
                         f"Gana {away_name}", "winner",
-                        away_odds, p, imp,
-                        confidence_from_edge(edge, p),
-                        pick_type,
-                        h2h_market["bookmaker"],
-                        "h2h",
+                        away_odds, p, imp, confidence_from_edge(edge, p), pick_type,
+                        h2h_market["bookmaker"], "h2h",
                         build_tipster_explanation(
                             f"Gana {away_name}",
                             build_reasons("away"),
@@ -570,7 +574,6 @@ def get_candidates() -> List[Dict[str, Any]]:
                     )
                 )
 
-        # over sintético
         over_odds = consensus["synthetic_over25_odds"]
         if valid_band(over_odds):
             p = consensus["p_over25"]
@@ -581,11 +584,8 @@ def get_candidates() -> List[Dict[str, Any]]:
                 build_candidate(
                     event, competition, match, starts_at,
                     "Más de 2.5 goles", "over_2_5",
-                    over_odds, p, imp,
-                    confidence_from_edge(edge, p),
-                    pick_type,
-                    "MODEL",
-                    "synthetic_totals_2.5",
+                    over_odds, p, imp, confidence_from_edge(edge, p), pick_type,
+                    "MODEL", "synthetic_totals_2.5",
                     build_tipster_explanation(
                         "Más de 2.5 goles",
                         build_reasons("over25"),
@@ -597,7 +597,6 @@ def get_candidates() -> List[Dict[str, Any]]:
                 )
             )
 
-        # btts sintético
         btts_odds = consensus["synthetic_btts_odds"]
         if valid_band(btts_odds):
             p = consensus["p_btts_yes"]
@@ -608,11 +607,8 @@ def get_candidates() -> List[Dict[str, Any]]:
                 build_candidate(
                     event, competition, match, starts_at,
                     "Ambos marcan: Sí", "btts_yes",
-                    btts_odds, p, imp,
-                    confidence_from_edge(edge, p),
-                    pick_type,
-                    "MODEL",
-                    "synthetic_btts",
+                    btts_odds, p, imp, confidence_from_edge(edge, p), pick_type,
+                    "MODEL", "synthetic_btts",
                     build_tipster_explanation(
                         "Ambos marcan: Sí",
                         build_reasons("btts"),
@@ -858,7 +854,7 @@ def generate_daily_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v18"}
+    return {"status": "ok", "service": "top-picks-backend-v20"}
 
 
 @app.get("/health")
@@ -869,11 +865,11 @@ def health():
 @app.get("/debug-top-picks")
 def debug_top_picks():
     try:
-        fixtures = get_today_fixtures()
+        fixtures = get_nearby_fixtures()
         candidates = get_candidates()
         picks = select_daily_picks(candidates)
         return {
-            "fixtures_today_found": len(fixtures),
+            "fixtures_nearby_found": len(fixtures),
             "candidates_found": len(candidates),
             "daily_picks_count": len(picks),
             "preview": picks[:5],
