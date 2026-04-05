@@ -15,7 +15,7 @@ TZ_NAME = os.getenv("TZ", "Europe/Madrid")
 if not ODDS_API_KEY:
     raise RuntimeError("Falta ODDS_API_KEY en variables de entorno")
 
-app = FastAPI(title="Top Picks Backend", version="13.0.0")
+app = FastAPI(title="Top Picks Backend", version="14.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -123,7 +123,9 @@ def bookmaker_rank(key_or_title: str) -> int:
 def daily_cache_deadline() -> datetime:
     now = madrid_now()
     tomorrow = (now + timedelta(days=1)).date()
-    return pytz.timezone(TZ_NAME).localize(datetime.combine(tomorrow, datetime.min.time())) + timedelta(minutes=5)
+    return pytz.timezone(TZ_NAME).localize(
+        datetime.combine(tomorrow, datetime.min.time())
+    ) + timedelta(minutes=5)
 
 
 def odds_api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -141,12 +143,15 @@ def load_cache() -> Optional[Dict[str, Any]]:
     try:
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
+
         cached_until = data.get("cached_until")
         cache_day = data.get("cache_day")
         if not cached_until or not cache_day:
             return None
+
         until_dt = datetime.fromisoformat(cached_until)
         now = madrid_now()
+
         if now.strftime("%Y-%m-%d") == cache_day and now < until_dt.astimezone(pytz.timezone(TZ_NAME)):
             return data
         return None
@@ -158,14 +163,6 @@ def save_cache(data: Dict[str, Any]) -> None:
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-
-
-def clear_cache() -> None:
-    try:
-        if os.path.exists(CACHE_FILE):
-            os.remove(CACHE_FILE)
     except Exception:
         pass
 
@@ -208,7 +205,7 @@ def fetch_events_for_sport(sport_key: str) -> List[Dict[str, Any]]:
             if isinstance(data, list):
                 return data
         except Exception as e:
-            log("Error sport", alias, str(e))
+            log("Error sport odds", alias, str(e))
             continue
 
     return []
@@ -229,7 +226,7 @@ def fetch_scores_for_sport(sport_key: str, days_from: int = 3) -> List[Dict[str,
             if isinstance(data, list):
                 return data
         except Exception as e:
-            log("Error scores", alias, str(e))
+            log("Error sport scores", alias, str(e))
             continue
 
     return []
@@ -262,6 +259,8 @@ def get_today_fixtures() -> List[Dict[str, Any]]:
 
             if dt.strftime("%Y-%m-%d") != today_str:
                 continue
+
+            # nunca live
             if dt <= now:
                 continue
 
@@ -312,6 +311,7 @@ def get_best_totals_market(event: Dict[str, Any], target_point: float = 2.5) -> 
 
             over = None
             under = None
+
             for outcome in market.get("outcomes", []):
                 point = safe_float(outcome.get("point"))
                 if point != target_point:
@@ -389,14 +389,11 @@ def build_market_consensus(event: Dict[str, Any]) -> Dict[str, float]:
     if over25_prices:
         p_over25 = clamp(implied_probability(avg_over25) + 0.03, 0.30, 0.72)
 
-    p_btts = clamp(0.41 + (balance * 0.14), 0.28, 0.66)
-
     return {
         "p_home": p_home,
         "p_away": p_away,
         "p_draw": p_draw,
         "p_over25": p_over25,
-        "p_btts_yes": p_btts,
     }
 
 
@@ -405,9 +402,7 @@ def build_reasons(side: str) -> List[str]:
         return ["mejor consenso de mercado", "ventaja prepartido", "partido favorable"][:3]
     if side == "away":
         return ["mejor consenso de mercado", "valor en visitante", "perfil competitivo sólido"][:3]
-    if side == "over25":
-        return ["partido abierto", "línea favorable", "perfil goleador"][:3]
-    return ["equilibrio ofensivo", "intercambio de goles plausible", "modelo favorable"][:3]
+    return ["partido abierto", "línea favorable", "perfil goleador"][:3]
 
 
 def classify_pick_type(odds: float) -> str:
@@ -493,7 +488,10 @@ def get_candidates() -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
 
     for event in events:
-        competition = event.get("sport_title", TARGET_SPORTS.get(event.get("sport_key", ""), {}).get("title", "Competition"))
+        competition = event.get(
+            "sport_title",
+            TARGET_SPORTS.get(event.get("sport_key", ""), {}).get("title", "Competition")
+        )
         home_name = event.get("home_team", "Local")
         away_name = event.get("away_team", "Visitante")
         match = f"{home_name} vs {away_name}"
@@ -649,12 +647,8 @@ def determine_pick_result(pick: Dict[str, Any], score_event: Dict[str, Any]) -> 
             won = True
         elif pick_text == f"Gana {away}" and away_goals > home_goals:
             won = True
-
     elif market_group == "over_2_5":
         won = total_goals > 2.5
-
-    elif market_group == "btts_yes":
-        won = home_goals > 0 and away_goals > 0
 
     return {
         "status": "won" if won else "lost",
@@ -674,7 +668,7 @@ def settle_history() -> Dict[str, Any]:
 
     changed = False
 
-    for day_key, day_data in history.get("days", {}).items():
+    for _, day_data in history.get("days", {}).items():
         picks = day_data.get("picks", [])
         for pick in picks:
             if pick.get("status") in {"won", "lost"}:
@@ -742,7 +736,6 @@ def build_history_response() -> Dict[str, Any]:
     total_pending = sum(day.get("stats", {}).get("pending", 0) for day in days)
     total_picks = sum(day.get("stats", {}).get("total", 0) for day in days)
     settled = total_won + total_lost
-
     hit_rate = round((total_won / settled) * 100, 1) if settled > 0 else 0.0
 
     return {
@@ -781,7 +774,7 @@ def generate_daily_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v13"}
+    return {"status": "ok", "service": "top-picks-backend-v14"}
 
 
 @app.get("/health")
@@ -815,7 +808,6 @@ def history_picks():
 
 @app.get("/top-picks-today")
 def top_picks_today(refresh: int = Query(default=0)):
-    # refresh se ignora a propósito para mantener picks fijos durante todo el día
     cached = load_cache()
     if cached:
         return cached
