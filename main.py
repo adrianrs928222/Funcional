@@ -241,4 +241,4 @@ def fetch_scores_for_sport(sport_key: str, days_from: int = 3) -> List[Dict[str,
     return []
 
 
-def get_nearby_fixtures() -> List[
+def get_nearby_fixtures() -> List[...]
