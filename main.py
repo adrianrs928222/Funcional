@@ -22,7 +22,7 @@ if not API_KEY:
 CACHE_FILE = "cache.json"
 HISTORY_FILE = "history.json"
 
-LOOKAHEAD_HOURS = 24
+LOOKAHEAD_HOURS = 48
 CACHE_REFRESH_HOURS = 6
 MAX_PICKS = 12
 MAX_HISTORY_DAYS = 10
@@ -53,6 +53,7 @@ TEAM_RATINGS: Dict[str, float] = {
     "Real Betis Balompié": 80,
     "Valencia CF": 77,
     "Sevilla FC": 78,
+    "Girona FC": 79,
     "Arsenal FC": 90,
     "Manchester City FC": 94,
     "Liverpool FC": 91,
@@ -60,18 +61,22 @@ TEAM_RATINGS: Dict[str, float] = {
     "Tottenham Hotspur FC": 84,
     "Newcastle United FC": 82,
     "Aston Villa FC": 82,
+    "Manchester United FC": 81,
     "FC Internazionale Milano": 90,
     "Juventus FC": 86,
     "AC Milan": 86,
     "SSC Napoli": 84,
     "AS Roma": 82,
+    "Atalanta BC": 83,
     "FC Bayern München": 92,
     "Bayer 04 Leverkusen": 89,
     "Borussia Dortmund": 86,
     "RB Leipzig": 84,
+    "VfB Stuttgart": 81,
     "Paris Saint-Germain FC": 91,
     "Olympique de Marseille": 81,
     "AS Monaco FC": 82,
+    "LOSC Lille": 80,
     "SL Benfica": 84,
     "Sporting CP": 84,
     "FC Porto": 83,
@@ -158,18 +163,62 @@ def cache_is_valid(cache: Dict[str, Any]) -> bool:
 def api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
     headers = {"X-Auth-Token": API_KEY}
     r = requests.get(f"{BASE_URL}{path}", headers=headers, params=params or {}, timeout=25)
+
     if not r.ok:
         raise requests.HTTPError(f"{r.status_code} {r.text[:500]}")
+
     return r.json()
 
 def stable_team_rating(team_name: str) -> float:
     if team_name in TEAM_RATINGS:
         return TEAM_RATINGS[team_name]
+
     h = abs(hash(team_name)) % 1000
     return 68 + (h / 1000) * 16
 
 # =========================================================
-# FIXTURES
+# ROOT / TEST
+# =========================================================
+
+@app.get("/")
+def root():
+    return {
+        "ok": True,
+        "msg": "API funcionando",
+        "endpoints": [
+            "/api/picks",
+            "/api/history",
+            "/test",
+            "/test-api",
+        ],
+    }
+
+@app.get("/test")
+def test():
+    return {"ok": True}
+
+@app.get("/test-api")
+def test_api():
+    try:
+        data = api_get(
+            "/competitions/PD/matches",
+            {
+                "dateFrom": now_local().date().isoformat(),
+                "dateTo": (now_local() + timedelta(days=1)).date().isoformat(),
+            },
+        )
+        return {
+            "ok": True,
+            "matches": len(data.get("matches", [])),
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": str(e),
+        }
+
+# =========================================================
+# FIXTURES REALES
 # =========================================================
 
 def fetch_matches_for_competition(code: str, start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
@@ -215,7 +264,9 @@ def get_real_events_window() -> List[Dict[str, Any]]:
     for code, meta in COMPETITIONS.items():
         try:
             matches = fetch_matches_for_competition(code, start, end)
-        except Exception:
+            print(f"{code} -> {len(matches)} partidos")
+        except Exception as e:
+            print(f"ERROR competición {code}: {e}")
             continue
 
         for match in matches:
@@ -226,6 +277,7 @@ def get_real_events_window() -> List[Dict[str, Any]]:
             if start <= event["dt_local"] <= end:
                 events.append(event)
 
+    print("EVENTOS FINALES:", len(events))
     return events
 
 def get_recent_events_for_scoring() -> Dict[int, Dict[str, Any]]:
@@ -249,7 +301,7 @@ def get_recent_events_for_scoring() -> Dict[int, Dict[str, Any]]:
     return event_map
 
 # =========================================================
-# MODELO
+# MODELO DE PREDICCIÓN
 # =========================================================
 
 def compute_strengths(home: str, away: str, league_priority: int) -> Tuple[float, float]:
@@ -482,6 +534,26 @@ def resolve_pick_status(pick: Dict[str, Any], score_obj: Dict[str, Any]) -> Tupl
 
     return "pending", score_line
 
+def get_recent_events_for_scoring() -> Dict[int, Dict[str, Any]]:
+    start = now_local() - timedelta(days=SCORE_REFRESH_DAYS_BACK)
+    end = now_local() + timedelta(days=1)
+
+    event_map: Dict[int, Dict[str, Any]] = {}
+
+    for code, meta in COMPETITIONS.items():
+        try:
+            matches = fetch_matches_for_competition(code, start, end)
+        except Exception:
+            continue
+
+        for match in matches:
+            event = build_event_from_match(match, meta["name"], int(meta["priority"]))
+            if not event or event.get("id") is None:
+                continue
+            event_map[int(event["id"])] = event
+
+    return event_map
+
 def refresh_scores_for_history(history: Dict[str, Any]) -> Dict[str, Any]:
     history.setdefault("days", {})
     event_map = get_recent_events_for_scoring()
@@ -661,19 +733,6 @@ def get_cached_or_refresh(force_refresh: bool = False, league: Optional[str] = N
 # ROUTES
 # =========================================================
 
-@app.get("/")
-def root():
-    return {
-        "ok": True,
-        "name": "Top Picks Pro",
-        "endpoints": [
-            "/api/picks",
-            "/api/picks?force_refresh=true",
-            "/api/picks?league=LaLiga",
-            "/api/history",
-        ],
-    }
-
 @app.get("/api/picks")
 def get_picks(
     force_refresh: bool = Query(False),
@@ -698,10 +757,16 @@ def get_picks(
             "combo_of_day": combo,
         }
 
-    except requests.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Error consultando football-data.org: {str(e)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "error": True,
+            "message": str(e),
+            "count": 0,
+            "picks": [],
+            "combo_of_day": {},
+        }
 
 @app.get("/api/history")
 def get_history():
@@ -721,4 +786,4 @@ def get_history():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
