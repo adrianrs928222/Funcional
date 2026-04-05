@@ -15,7 +15,7 @@ TZ_NAME = os.getenv("TZ", "Europe/Madrid")
 if not ODDS_API_KEY:
     raise RuntimeError("Falta ODDS_API_KEY en variables de entorno")
 
-app = FastAPI(title="Top Picks Backend", version="17.0.0")
+app = FastAPI(title="Top Picks Backend", version="18.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -89,7 +89,7 @@ def safe_float(v: Any) -> Optional[float]:
 
 
 def implied_probability(odds: float) -> float:
-    return 1.0 / odds if odds > 0 else 0.0
+    return 1.0 / odds if odds and odds > 0 else 0.0
 
 
 def iso_to_local_hhmm(iso_str: str) -> str:
@@ -259,7 +259,8 @@ def get_today_fixtures() -> List[Dict[str, Any]]:
             if dt.strftime("%Y-%m-%d") != today_str:
                 continue
 
-            if dt <= now:
+            # menos estricto: deja margen de 2h para evitar falsos negativos
+            if dt <= now - timedelta(hours=2):
                 continue
 
             item["_priority"] = sport_priority(item.get("sport_key", ""))
@@ -286,10 +287,7 @@ def get_best_h2h_market(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             outcomes = market.get("outcomes", [])
             if len(outcomes) < 2:
                 continue
-            candidate = {
-                "bookmaker": bookmaker.get("title", "Bookmaker"),
-                "outcomes": outcomes,
-            }
+            candidate = {"bookmaker": bookmaker.get("title", "Bookmaker"), "outcomes": outcomes}
             if rank < best_rank:
                 best = candidate
                 best_rank = rank
@@ -409,29 +407,30 @@ def build_market_consensus(event: Dict[str, Any]) -> Dict[str, float]:
     def avg(xs: List[float], default: float) -> float:
         return sum(xs) / len(xs) if xs else default
 
-    avg_home = avg(home_prices, 2.15)
-    avg_away = avg(away_prices, 2.15)
-    avg_draw = avg(draw_prices, 3.15)
-    avg_over25 = avg(over25_prices, 1.95)
-    avg_btts_yes = avg(btts_yes_prices, 1.90)
+    avg_home = avg(home_prices, 2.10)
+    avg_away = avg(away_prices, 2.10)
+    avg_draw = avg(draw_prices, 3.10)
+    avg_over25 = avg(over25_prices, 1.90)
+    avg_btts_yes = avg(btts_yes_prices, 1.85)
 
     home_imp = implied_probability(avg_home)
     away_imp = implied_probability(avg_away)
     draw_imp = implied_probability(avg_draw)
     total = max(home_imp + away_imp + draw_imp, 1e-9)
 
-    p_home = clamp(home_imp / total, 0.12, 0.78)
-    p_away = clamp(away_imp / total, 0.12, 0.78)
-    p_draw = clamp(draw_imp / total, 0.08, 0.40)
+    p_home = clamp(home_imp / total, 0.10, 0.80)
+    p_away = clamp(away_imp / total, 0.10, 0.80)
+    p_draw = clamp(draw_imp / total, 0.08, 0.42)
 
     balance = 1.0 - abs(p_home - p_away)
-    p_over25 = clamp(0.43 + (balance * 0.17), 0.30, 0.70)
-    if over25_prices:
-        p_over25 = clamp(implied_probability(avg_over25) + 0.03, 0.30, 0.72)
 
-    p_btts_yes = clamp(0.39 + (balance * 0.16), 0.28, 0.68)
+    p_over25 = clamp(0.44 + (balance * 0.18), 0.28, 0.74)
+    if over25_prices:
+        p_over25 = clamp(implied_probability(avg_over25) + 0.04, 0.28, 0.76)
+
+    p_btts_yes = clamp(0.40 + (balance * 0.18), 0.28, 0.74)
     if btts_yes_prices:
-        p_btts_yes = clamp(implied_probability(avg_btts_yes) + 0.03, 0.28, 0.72)
+        p_btts_yes = clamp(implied_probability(avg_btts_yes) + 0.04, 0.28, 0.76)
 
     return {
         "p_home": p_home,
@@ -445,50 +444,50 @@ def build_market_consensus(event: Dict[str, Any]) -> Dict[str, float]:
 def build_reasons(side: str) -> List[str]:
     if side == "home":
         return [
-            "llega mejor situado para mandar en el partido",
+            "llega bien perfilado para dominar momentos importantes",
             "el cruce le favorece bastante",
-            "tiene argumentos sólidos para imponerse",
+            "tiene argumentos para sacar adelante el partido",
         ]
     if side == "away":
         return [
-            "el valor está más del lado visitante de lo que parece",
-            "el emparejamiento le encaja bien",
-            "tiene nivel para competir y sacar premio",
+            "el visitante tiene más peligro del que parece",
+            "el partido le encaja bien por contexto",
+            "puede competir muy fuerte fuera de casa",
         ]
     if side == "over25":
         return [
-            "se espera un partido con ritmo y espacios",
-            "el guion apunta a ocasiones en ambas áreas",
-            "hay escenario claro para ver varios goles",
+            "se espera un partido más abierto de lo habitual",
+            "el guion invita a ver llegadas y ritmo",
+            "hay escenario claro para varios goles",
         ]
     return [
-        "los dos equipos tienen vías reales para marcar",
-        "el partido invita al intercambio de golpes",
-        "el contexto favorece goles en ambas porterías",
+        "los dos equipos tienen opciones reales de marcar",
+        "el duelo pinta a intercambio de golpes",
+        "hay contexto para ver ocasiones en ambas áreas",
     ]
 
 
 def classify_pick_type(odds: float) -> str:
-    if 1.75 <= odds <= 2.39:
+    if 1.70 <= odds <= 2.49:
         return "medio"
     return "agresivo"
 
 
 def confidence_from_edge(edge: float, model_prob: float) -> str:
-    if edge >= 0.08 and model_prob >= 0.53:
+    if edge >= 0.06 and model_prob >= 0.50:
         return "verde"
-    if edge >= 0.02:
+    if edge >= 0.00:
         return "amarillo"
     return "rojo"
 
 
 def score_pick(edge: float, model_prob: float, pick_type: str) -> float:
     type_bonus = {"medio": 0.09, "agresivo": 0.11}.get(pick_type, 0.0)
-    return edge * 0.58 + model_prob * 0.24 + type_bonus
+    return edge * 0.50 + model_prob * 0.26 + type_bonus
 
 
 def valid_band(odds: float) -> bool:
-    return 1.65 <= odds <= 4.80
+    return 1.40 <= odds <= 6.00
 
 
 def candidate_quality_tier(candidate: Dict[str, Any]) -> str:
@@ -497,18 +496,14 @@ def candidate_quality_tier(candidate: Dict[str, Any]) -> str:
     model_prob = float(candidate.get("model_probability", 0)) / 100.0
     confidence = str(candidate.get("confidence", "")).lower()
 
-    if edge >= 5.0 and model_prob >= 0.50 and 1.70 <= odds <= 3.60:
+    if edge >= 4.0 and model_prob >= 0.48 and 1.55 <= odds <= 4.20:
         return "A"
-
-    if edge >= 2.0 and model_prob >= 0.45 and 1.65 <= odds <= 4.20:
+    if edge >= 1.0 and model_prob >= 0.42 and 1.45 <= odds <= 5.00:
         return "B"
-
-    if edge >= -1.5 and model_prob >= 0.40 and 1.65 <= odds <= 4.80:
+    if edge >= -3.0 and model_prob >= 0.36 and 1.40 <= odds <= 6.00:
         return "C"
-
-    if confidence in {"verde", "amarillo"} and 1.65 <= odds <= 4.80:
+    if confidence in {"verde", "amarillo"} and 1.40 <= odds <= 6.00:
         return "D"
-
     return "Z"
 
 
@@ -518,25 +513,22 @@ def build_tipster_explanation(label: str, reasons: List[str], odds: float, marke
     if market_group == "winner":
         return (
             f"{label} entra porque {joined}. "
-            f"Es una cuota {round(odds, 2)} que encaja muy bien para el perfil del partido y merece estar entre los destacados del día."
+            f"Cuota {round(odds, 2)} interesante para el perfil del partido y suficiente para estar entre los picks del día."
         )
 
     if market_group == "over_2_5":
         return (
             f"{label} entra porque {joined}. "
-            f"El guion del encuentro apunta a un choque vivo, con ritmo suficiente como para ir por encima de la línea."
+            f"Todo apunta a un choque con ritmo y opciones de ver un partido más abierto de lo normal."
         )
 
     if market_group == "btts_yes":
         return (
             f"{label} entra porque {joined}. "
-            f"Pinta a partido en el que ninguno de los dos debería pasar en blanco si se cumple el desarrollo esperado."
+            f"Es un partido donde cuesta imaginar a alguno de los dos sin dejar su momento en ataque."
         )
 
-    return (
-        f"{label} entra porque {joined}. "
-        f"Es un pick con buena pinta para el contexto de hoy."
-    )
+    return f"{label} entra porque {joined}."
 
 
 def build_candidate(
@@ -631,7 +623,7 @@ def get_candidates() -> List[Dict[str, Any]]:
                             f"Gana {home_name}",
                             build_reasons("home"),
                             home_odds,
-                            "winner"
+                            "winner",
                         ),
                         score_pick(edge, p, pick_type),
                     )
@@ -652,7 +644,7 @@ def get_candidates() -> List[Dict[str, Any]]:
                             f"Gana {away_name}",
                             build_reasons("away"),
                             away_odds,
-                            "winner"
+                            "winner",
                         ),
                         score_pick(edge, p, pick_type),
                     )
@@ -676,7 +668,7 @@ def get_candidates() -> List[Dict[str, Any]]:
                             "Más de 2.5 goles",
                             build_reasons("over25"),
                             over_odds,
-                            "over_2_5"
+                            "over_2_5",
                         ),
                         score_pick(edge, p, pick_type),
                     )
@@ -700,14 +692,16 @@ def get_candidates() -> List[Dict[str, Any]]:
                             "Ambos marcan: Sí",
                             build_reasons("btts"),
                             yes_odds,
-                            "btts_yes"
+                            "btts_yes",
                         ),
                         score_pick(edge, p, pick_type),
                     )
                 )
 
+        # si no hay ninguno fuerte, intenta coger el mejor igualmente
         if event_candidates:
-            best = sorted(event_candidates, key=lambda x: x["score"], reverse=True)[0]
+            event_candidates.sort(key=lambda x: x["score"], reverse=True)
+            best = event_candidates[0]
             candidates.append(best)
 
     candidates.sort(
@@ -755,27 +749,32 @@ def select_daily_picks(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     tier_c.sort(key=sort_key, reverse=True)
     tier_d.sort(key=sort_key, reverse=True)
 
+    # 1) los mejores
     for item in tier_a:
         if len(selected) >= 2:
             break
         add_item(item)
 
+    # 2) buenos
     for item in tier_b:
         if len(selected) >= 4:
             break
         add_item(item)
 
+    # 3) aceptables
     for item in tier_c:
         if len(selected) >= 5:
             break
         add_item(item)
 
+    # 4) completar con lo que quede
     remainder = tier_a + tier_b + tier_c + tier_d
     for item in remainder:
         if len(selected) >= 5:
             break
         add_item(item)
 
+    # 5) último seguro
     if len(selected) < 5:
         all_sorted = sorted(candidates, key=sort_key, reverse=True)
         for item in all_sorted:
@@ -946,7 +945,7 @@ def generate_daily_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v16"}
+    return {"status": "ok", "service": "top-picks-backend-v18"}
 
 
 @app.get("/health")
@@ -980,7 +979,7 @@ def history_picks():
 
 @app.get("/top-picks-today")
 def top_picks_today(refresh: int = Query(default=0)):
-    # refresh se ignora para mantener picks fijos durante el día
+    # aunque se pulse refresh, mantenemos el día fijo
     cached = load_cache()
     if cached:
         return cached
