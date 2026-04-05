@@ -1,23 +1,21 @@
 import json
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
 import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-API_KEY = os.getenv("API_KEY", "").strip()
-BASE_URL = os.getenv("APISPORTS_BASE_URL", "https://v3.football.api-sports.io").rstrip("/")
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "").strip()
+ODDS_API_BASE_URL = os.getenv("ODDS_API_BASE_URL", "https://api.the-odds-api.com").rstrip("/")
 TZ_NAME = os.getenv("TZ", "Europe/Madrid")
 
-if not API_KEY:
-    raise RuntimeError("Falta API_KEY en variables de entorno")
+if not ODDS_API_KEY:
+    raise RuntimeError("Falta ODDS_API_KEY en variables de entorno")
 
-HEADERS = {"x-apisports-key": API_KEY}
-
-app = FastAPI(title="Top Picks Backend", version="10.0.0")
+app = FastAPI(title="Top Picks Backend", version="11.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -29,12 +27,46 @@ app.add_middleware(
 
 CACHE_FILE = "daily_cache.json"
 
-TARGET_LEAGUES = {
-    140, 39, 135, 78, 61,      # top
-    141, 40, 136, 79, 62,      # second divisions
-    2, 3, 848,                 # Europe
-    1, 4                       # World Cup / Euro
+# Sport keys reales de The Odds API
+TARGET_SPORTS = {
+    "soccer_spain_la_liga": {"title": "LaLiga", "priority": 84},
+    "soccer_epl": {"title": "Premier League", "priority": 85},
+    "soccer_italy_serie_a": {"title": "Serie A", "priority": 83},
+    "soccer_germany_bundesliga": {"title": "Bundesliga", "priority": 82},
+    "soccer_france_ligue_one": {"title": "Ligue 1", "priority": 81},
+    "soccer_spain_segunda_division": {"title": "LaLiga 2", "priority": 69},
+    "soccer_efl_champ": {"title": "Championship", "priority": 70},
+    "soccer_italy_serie_b": {"title": "Serie B", "priority": 67},
+    "soccer_germany_bundesliga2": {"title": "Bundesliga 2", "priority": 68},
+    "soccer_france_ligue_two": {"title": "Ligue 2", "priority": 66},
+    "soccer_uefa_champs_league": {"title": "Champions League", "priority": 100},
+    "soccer_uefa_europa_league": {"title": "Europa League", "priority": 95},
+    "soccer_uefa_europa_conference_league": {"title": "Conference League", "priority": 90},
+    "soccer_fifa_world_cup": {"title": "World Cup", "priority": 98},
+    "soccer_uefa_european_championship": {"title": "Euro", "priority": 97},
 }
+
+# Algunos sport keys pueden no estar activos según la temporada/cobertura
+SPORT_KEY_ALIASES = {
+    "soccer_france_ligue_one": ["soccer_france_ligue_one", "soccer_france_ligue_1"],
+    "soccer_france_ligue_two": ["soccer_france_ligue_two", "soccer_france_ligue_2"],
+    "soccer_efl_champ": ["soccer_efl_champ", "soccer_england_efl_championship"],
+    "soccer_germany_bundesliga2": ["soccer_germany_bundesliga2", "soccer_germany_bundesliga_2"],
+    "soccer_fifa_world_cup": ["soccer_fifa_world_cup"],
+}
+
+BOOKMAKER_PRIORITY = [
+    "bet365",
+    "pinnacle",
+    "unibet",
+    "williamhill",
+    "bwin",
+    "ladbrokes",
+    "betfair",
+    "1xbet",
+]
+
+REGIONS = "uk,eu"
 
 
 def log(*args: Any) -> None:
@@ -72,38 +104,10 @@ def normalize_text(value: str) -> str:
         str(value or "")
         .strip()
         .lower()
-        .replace("-", " ")
-        .replace("_", " ")
-        .replace("/", " ")
+        .replace("-", "")
+        .replace("_", "")
+        .replace(" ", "")
     )
-
-
-def league_priority(league_id: int) -> int:
-    priority_map = {
-        2: 100,
-        1: 98,
-        4: 97,
-        3: 95,
-        848: 90,
-        39: 85,
-        140: 84,
-        135: 83,
-        78: 82,
-        61: 81,
-        40: 70,
-        141: 69,
-        79: 68,
-        136: 67,
-        62: 66,
-    }
-    return priority_map.get(league_id, 10)
-
-
-def api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    url = f"{BASE_URL}{path}"
-    resp = requests.get(url, headers=HEADERS, params=params or {}, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
 
 
 def load_cache() -> Optional[Dict[str, Any]]:
@@ -139,462 +143,252 @@ def clear_cache() -> None:
         pass
 
 
-def get_upcoming_fixtures() -> List[Dict[str, Any]]:
-    fixtures: List[Dict[str, Any]] = []
-    now = madrid_now()
+def odds_api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    url = f"{ODDS_API_BASE_URL}{path}"
+    params = params or {}
+    params["apiKey"] = ODDS_API_KEY
+    resp = requests.get(url, params=params, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
 
-    season = now.year
-    if now.month < 7:
-        season = now.year - 1
 
-    seen_fixture_ids = set()
+def bookmaker_rank(key_or_title: str) -> int:
+    norm = normalize_text(key_or_title)
+    for idx, name in enumerate(BOOKMAKER_PRIORITY):
+        if normalize_text(name) == norm:
+            return idx
+    return 999
 
-    for league_id in TARGET_LEAGUES:
+
+def sport_priority(sport_key: str) -> int:
+    return TARGET_SPORTS.get(sport_key, {}).get("priority", 10)
+
+
+def fetch_events_for_sport(sport_key: str) -> List[Dict[str, Any]]:
+    aliases = SPORT_KEY_ALIASES.get(sport_key, [sport_key])
+
+    for alias in aliases:
         try:
-            payload = api_get("/fixtures", {
-                "league": league_id,
-                "season": season,
-                "next": 12
-            })
+            data = odds_api_get(
+                f"/v4/sports/{alias}/odds",
+                {
+                    "regions": REGIONS,
+                    "markets": "h2h,totals",
+                    "oddsFormat": "decimal",
+                    "dateFormat": "iso",
+                },
+            )
+            if isinstance(data, list):
+                return data
         except Exception as e:
-            log("Error league", league_id, str(e))
+            log("Error sport", alias, str(e))
             continue
 
-        for item in payload.get("response", []):
-            fixture = item.get("fixture", {})
-            status_short = fixture.get("status", {}).get("short")
-            fixture_id = fixture.get("id")
-            fixture_date_str = fixture.get("date")
+    return []
 
-            if not fixture_id or fixture_id in seen_fixture_ids:
+
+def get_upcoming_fixtures() -> List[Dict[str, Any]]:
+    now = madrid_now()
+    events: List[Dict[str, Any]] = []
+    seen = set()
+
+    for sport_key in TARGET_SPORTS.keys():
+        items = fetch_events_for_sport(sport_key)
+        for item in items:
+            event_id = item.get("id")
+            if not event_id or event_id in seen:
                 continue
 
-            # solo prepartido
-            if status_short not in {"NS", "TBD"}:
+            commence_time = item.get("commence_time")
+            if not commence_time:
                 continue
 
             try:
-                fixture_dt = datetime.fromisoformat(
-                    fixture_date_str.replace("Z", "+00:00")
-                ).astimezone(pytz.timezone(TZ_NAME))
+                dt = datetime.fromisoformat(commence_time.replace("Z", "+00:00")).astimezone(
+                    pytz.timezone(TZ_NAME)
+                )
             except Exception:
                 continue
 
-            # permite hoy y próximos; evita partidos claramente pasados
-            if fixture_dt < now - timedelta(hours=6):
+            # Solo prepartido cercano
+            if dt < now - timedelta(hours=2):
                 continue
 
-            fixtures.append(item)
-            seen_fixture_ids.add(fixture_id)
+            item["_priority"] = sport_priority(item.get("sport_key", ""))
+            events.append(item)
+            seen.add(event_id)
 
-    fixtures.sort(
-        key=lambda x: (
-            -league_priority(x.get("league", {}).get("id", 0)),
-            x.get("fixture", {}).get("date", "")
-        )
-    )
-
-    log("Fixtures encontrados:", len(fixtures))
-    return fixtures
+    events.sort(key=lambda x: (-x.get("_priority", 10), x.get("commence_time", "")))
+    log("Fixtures encontrados:", len(events))
+    return events
 
 
-def get_prediction(fixture_id: int) -> Optional[Dict[str, Any]]:
-    try:
-        payload = api_get("/predictions", {"fixture": fixture_id})
-        items = payload.get("response", [])
-        return items[0] if items else None
-    except Exception:
-        return None
+def get_best_h2h_market(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    best = None
+    best_rank = 999
 
-
-def market_type_from_name(name: str) -> Optional[str]:
-    n = normalize_text(name)
-
-    winner_keywords = [
-        "match winner",
-        "winner",
-        "1x2",
-        "fulltime result",
-        "full time result",
-        "match result",
-        "final result",
-        "resultado final",
-        "ganador del partido",
-        "tiempo reglamentario",
-        "resultado",
-    ]
-    if any(k in n for k in winner_keywords):
-        return "winner"
-
-    over_keywords = [
-        "over under",
-        "goals over under",
-        "total goals",
-        "totals",
-        "más menos",
-        "mas menos",
-        "goals o u",
-    ]
-    if any(k in n for k in over_keywords) and "2.5" in n:
-        return "over_2_5"
-
-    btts_keywords = [
-        "both teams to score",
-        "btts",
-        "gg ng",
-        "ambos equipos marcan",
-        "both teams score",
-        "both teams",
-        "ambos marcan",
-    ]
-    if any(k in n for k in btts_keywords):
-        return "btts_yes"
-
-    return None
-
-
-def parse_selection_label(label: str) -> Optional[str]:
-    v = normalize_text(label)
-
-    if v in {
-        "home", "1", "local", "team1", "equipo local",
-        "home team", "host", "domicile"
-    }:
-        return "home"
-
-    if v in {
-        "away", "2", "visitante", "team2", "equipo visitante",
-        "away team", "guest"
-    }:
-        return "away"
-
-    if v in {"draw", "x", "empate"}:
-        return "draw"
-
-    if ("over" in v or "more" in v or "mas" in v or "más" in v) and "2.5" in v:
-        return "over_2_5"
-
-    if ("under" in v or "less" in v or "menos" in v) and "2.5" in v:
-        return "under_2_5"
-
-    if v in {"yes", "si", "sí", "y", "gg"}:
-        return "yes"
-
-    if v in {"no", "n", "ng"}:
-        return "no"
-
-    return None
-
-
-def extract_markets_from_odds_item(odds_item: Dict[str, Any]) -> List[Dict[str, Any]]:
-    bookmakers = odds_item.get("bookmakers", [])
-    if not bookmakers:
-        return []
-
-    preferred_bookmakers = [
-        "Bet365",
-        "1xBet",
-        "William Hill",
-        "Bwin",
-        "Unibet",
-        "Marathonbet",
-        "Pinnacle",
-    ]
-
-    def bookmaker_rank(name: str) -> int:
-        normalized = normalize_text(name)
-        for idx, preferred in enumerate(preferred_bookmakers):
-            if normalize_text(preferred) == normalized:
-                return idx
-        return 999
-
-    found: List[Dict[str, Any]] = []
-
-    sorted_bookmakers = sorted(
-        bookmakers,
-        key=lambda b: bookmaker_rank(str(b.get("name", "")))
-    )
-
-    for bookmaker in sorted_bookmakers:
-        bookmaker_name = str(bookmaker.get("name", "Bookmaker"))
-
-        for bet in bookmaker.get("bets", []):
-            raw_market_name = str(bet.get("name", ""))
-            market_type = market_type_from_name(raw_market_name)
-            if not market_type:
+    for bookmaker in event.get("bookmakers", []):
+        rank = bookmaker_rank(bookmaker.get("key") or bookmaker.get("title", ""))
+        for market in bookmaker.get("markets", []):
+            if market.get("key") != "h2h":
                 continue
-
-            values_map: Dict[str, float] = {}
-
-            for value in bet.get("values", []):
-                label = parse_selection_label(value.get("value", ""))
-                odd = safe_float(value.get("odd"))
-                if label is None or odd is None:
-                    continue
-                values_map[label] = odd
-
-            if market_type == "winner" and "home" in values_map and "away" in values_map:
-                found.append({
-                    "market_type": "winner",
-                    "bookmaker": bookmaker_name,
-                    "market_name": raw_market_name,
-                    "values": {
-                        "home": values_map["home"],
-                        "away": values_map["away"],
-                        "draw": values_map.get("draw"),
-                    },
-                    "bookmaker_rank": bookmaker_rank(bookmaker_name),
-                })
-
-            elif market_type == "over_2_5" and "over_2_5" in values_map:
-                found.append({
-                    "market_type": "over_2_5",
-                    "bookmaker": bookmaker_name,
-                    "market_name": raw_market_name,
-                    "values": {
-                        "over_2_5": values_map["over_2_5"],
-                        "under_2_5": values_map.get("under_2_5"),
-                    },
-                    "bookmaker_rank": bookmaker_rank(bookmaker_name),
-                })
-
-            elif market_type == "btts_yes" and "yes" in values_map:
-                found.append({
-                    "market_type": "btts_yes",
-                    "bookmaker": bookmaker_name,
-                    "market_name": raw_market_name,
-                    "values": {
-                        "yes": values_map["yes"],
-                        "no": values_map.get("no"),
-                    },
-                    "bookmaker_rank": bookmaker_rank(bookmaker_name),
-                })
-
-    found.sort(key=lambda x: x["bookmaker_rank"])
-    return found
-
-
-def get_match_markets(fixture_id: int) -> List[Dict[str, Any]]:
-    try:
-        payload = api_get("/odds", {"fixture": fixture_id})
-        items = payload.get("response", [])
-        if not items:
-            return []
-        return extract_markets_from_odds_item(items[0])
-    except Exception:
-        return []
-
-
-def get_last5_team_stats(team_id: int, home_context: bool) -> Dict[str, float]:
-    try:
-        payload = api_get("/fixtures", {
-            "team": team_id,
-            "last": 5,
-            "status": "FT",
-        })
-        items = payload.get("response", [])
-
-        if not items:
-            return {
-                "points_form": 0.50,
-                "goals_for": 1.00,
-                "goals_against": 1.00,
-                "win_rate": 0.40,
-                "clean_sheet_rate": 0.20,
-                "context_rate": 0.50,
-                "consistency": 0.50,
+            outcomes = market.get("outcomes", [])
+            if len(outcomes) < 2:
+                continue
+            candidate = {
+                "bookmaker": bookmaker.get("title", "Bookmaker"),
+                "bookmaker_key": bookmaker.get("key", ""),
+                "last_update": bookmaker.get("last_update"),
+                "outcomes": outcomes,
             }
+            if rank < best_rank:
+                best = candidate
+                best_rank = rank
 
-        points = 0.0
-        gf = 0.0
-        ga = 0.0
-        wins = 0
-        clean = 0
-        context_good = 0
-        goal_diffs: List[float] = []
-
-        for m in items:
-            home_id = m["teams"]["home"]["id"]
-            away_id = m["teams"]["away"]["id"]
-            home_goals = m["goals"]["home"] or 0
-            away_goals = m["goals"]["away"] or 0
-
-            is_home = team_id == home_id
-            team_goals = home_goals if is_home else away_goals
-            opp_goals = away_goals if is_home else home_goals
-
-            gf += team_goals
-            ga += opp_goals
-            goal_diffs.append(abs(team_goals - opp_goals))
-
-            if team_goals > opp_goals:
-                points += 3
-                wins += 1
-            elif team_goals == opp_goals:
-                points += 1
-
-            if opp_goals == 0:
-                clean += 1
-
-            if is_home == home_context and team_goals >= opp_goals:
-                context_good += 1
-
-        n = len(items)
-        avg_diff = sum(goal_diffs) / n if n else 1.0
-        consistency = clamp(1.0 - (avg_diff / 3.0), 0.0, 1.0)
-
-        return {
-            "points_form": points / (n * 3),
-            "goals_for": gf / n,
-            "goals_against": ga / n,
-            "win_rate": wins / n,
-            "clean_sheet_rate": clean / n,
-            "context_rate": context_good / n,
-            "consistency": consistency,
-        }
-    except Exception:
-        return {
-            "points_form": 0.50,
-            "goals_for": 1.00,
-            "goals_against": 1.00,
-            "win_rate": 0.40,
-            "clean_sheet_rate": 0.20,
-            "context_rate": 0.50,
-            "consistency": 0.50,
-        }
+    return best
 
 
-def normalize_attack(x: float) -> float:
-    return clamp(x / 2.5, 0.0, 1.0)
+def get_best_totals_market(event: Dict[str, Any], target_point: float = 2.5) -> Optional[Dict[str, Any]]:
+    best = None
+    best_rank = 999
+
+    for bookmaker in event.get("bookmakers", []):
+        rank = bookmaker_rank(bookmaker.get("key") or bookmaker.get("title", ""))
+        for market in bookmaker.get("markets", []):
+            if market.get("key") != "totals":
+                continue
+            outcomes = market.get("outcomes", [])
+            if not outcomes:
+                continue
+
+            # buscamos línea 2.5
+            over = None
+            under = None
+            for outcome in outcomes:
+                point = safe_float(outcome.get("point"))
+                if point != target_point:
+                    continue
+                name = str(outcome.get("name", "")).strip().lower()
+                if name == "over":
+                    over = outcome
+                elif name == "under":
+                    under = outcome
+
+            if over is not None:
+                candidate = {
+                    "bookmaker": bookmaker.get("title", "Bookmaker"),
+                    "bookmaker_key": bookmaker.get("key", ""),
+                    "over": over,
+                    "under": under,
+                }
+                if rank < best_rank:
+                    best = candidate
+                    best_rank = rank
+
+    return best
 
 
-def normalize_defense(x: float) -> float:
-    return clamp(1.0 - (x / 2.5), 0.0, 1.0)
+def build_market_consensus(event: Dict[str, Any]) -> Dict[str, float]:
+    home_team = event.get("home_team", "")
+    away_team = event.get("away_team", "")
 
+    home_prices: List[float] = []
+    away_prices: List[float] = []
+    draw_prices: List[float] = []
+    over25_prices: List[float] = []
 
-def build_match_model(fixture_item: Dict[str, Any], prediction: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    home_team = fixture_item["teams"]["home"]
-    away_team = fixture_item["teams"]["away"]
+    for bookmaker in event.get("bookmakers", []):
+        for market in bookmaker.get("markets", []):
+            if market.get("key") == "h2h":
+                for outcome in market.get("outcomes", []):
+                    name = outcome.get("name")
+                    price = safe_float(outcome.get("price"))
+                    if price is None:
+                        continue
+                    if name == home_team:
+                        home_prices.append(price)
+                    elif name == away_team:
+                        away_prices.append(price)
+                    elif str(name).strip().lower() in {"draw", "empate"}:
+                        draw_prices.append(price)
 
-    home_stats = get_last5_team_stats(home_team["id"], home_context=True)
-    away_stats = get_last5_team_stats(away_team["id"], home_context=False)
+            elif market.get("key") == "totals":
+                for outcome in market.get("outcomes", []):
+                    point = safe_float(outcome.get("point"))
+                    name = str(outcome.get("name", "")).strip().lower()
+                    price = safe_float(outcome.get("price"))
+                    if point == 2.5 and name == "over" and price is not None:
+                        over25_prices.append(price)
 
-    pred_home = 0.0
-    pred_away = 0.0
-    if prediction:
-        try:
-            winner = prediction.get("predictions", {}).get("winner", {})
-            winner_name = str(winner.get("name", "")).strip().lower()
-            if winner_name == str(home_team["name"]).strip().lower():
-                pred_home = 0.08
-            elif winner_name == str(away_team["name"]).strip().lower():
-                pred_away = 0.08
-        except Exception:
-            pass
+    def avg(xs: List[float], default: float) -> float:
+        return sum(xs) / len(xs) if xs else default
 
-    home_strength = (
-        0.22 * home_stats["points_form"] +
-        0.18 * home_stats["context_rate"] +
-        0.15 * normalize_attack(home_stats["goals_for"]) +
-        0.15 * normalize_defense(home_stats["goals_against"]) +
-        0.08 * home_stats["win_rate"] +
-        0.07 * home_stats["clean_sheet_rate"] +
-        0.08 * home_stats["consistency"] +
-        0.07 * pred_home
-    )
+    avg_home = avg(home_prices, 2.20)
+    avg_away = avg(away_prices, 2.20)
+    avg_draw = avg(draw_prices, 3.20)
+    avg_over25 = avg(over25_prices, 1.95)
 
-    away_strength = (
-        0.22 * away_stats["points_form"] +
-        0.18 * away_stats["context_rate"] +
-        0.15 * normalize_attack(away_stats["goals_for"]) +
-        0.15 * normalize_defense(away_stats["goals_against"]) +
-        0.08 * away_stats["win_rate"] +
-        0.07 * away_stats["clean_sheet_rate"] +
-        0.08 * away_stats["consistency"] +
-        0.07 * pred_away
-    )
+    home_imp = implied_probability(avg_home)
+    away_imp = implied_probability(avg_away)
+    draw_imp = implied_probability(avg_draw)
+    total = max(home_imp + away_imp + draw_imp, 1e-9)
 
-    home_strength += 0.03
+    p_home = clamp(home_imp / total, 0.10, 0.80)
+    p_away = clamp(away_imp / total, 0.10, 0.80)
+    p_draw = clamp(draw_imp / total, 0.08, 0.50)
 
-    total_strength = max(home_strength + away_strength, 1e-6)
-    p_home = clamp(home_strength / total_strength, 0.05, 0.90)
-    p_away = clamp(away_strength / total_strength, 0.05, 0.90)
+    # Over 2.5 si no hay totals, estimación conservadora por equilibrio del partido
+    balance = 1.0 - abs(p_home - p_away)
+    p_over25 = clamp(0.42 + (balance * 0.18), 0.30, 0.68)
+    if over25_prices:
+        p_over25 = clamp(implied_probability(avg_over25) + 0.03, 0.30, 0.72)
 
-    avg_goals = (
-        home_stats["goals_for"] +
-        away_stats["goals_for"] +
-        home_stats["goals_against"] +
-        away_stats["goals_against"]
-    ) / 2.0
-
-    over25_prob = clamp((avg_goals - 1.8) / 2.0, 0.18, 0.82)
-
-    home_scoring = clamp(home_stats["goals_for"] / 2.2, 0.15, 0.90)
-    away_scoring = clamp(away_stats["goals_for"] / 2.2, 0.15, 0.90)
-    btts_prob = clamp((home_scoring * away_scoring) + 0.20, 0.18, 0.82)
-
-    home_reasons: List[str] = []
-    away_reasons: List[str] = []
-    over_reasons: List[str] = []
-    btts_reasons: List[str] = []
-
-    if home_stats["points_form"] > away_stats["points_form"]:
-        home_reasons.append("mejor forma reciente")
-    if away_stats["points_form"] > home_stats["points_form"]:
-        away_reasons.append("mejor forma reciente")
-
-    if home_stats["context_rate"] > away_stats["context_rate"]:
-        home_reasons.append("rinde mejor en casa")
-    if away_stats["context_rate"] > home_stats["context_rate"]:
-        away_reasons.append("rinde mejor fuera")
-
-    if home_stats["goals_for"] > away_stats["goals_for"]:
-        home_reasons.append("más gol reciente")
-    if away_stats["goals_for"] > home_stats["goals_for"]:
-        away_reasons.append("más gol reciente")
-
-    if home_stats["goals_against"] < away_stats["goals_against"]:
-        home_reasons.append("más solidez defensiva")
-    if away_stats["goals_against"] < home_stats["goals_against"]:
-        away_reasons.append("más solidez defensiva")
-
-    if avg_goals >= 2.5:
-        over_reasons.append("promedio goleador alto")
-    if home_stats["goals_for"] >= 1.4:
-        over_reasons.append("local con buena producción ofensiva")
-    if away_stats["goals_for"] >= 1.2:
-        over_reasons.append("visitante también genera ocasiones")
-    if home_stats["goals_against"] >= 1.0 or away_stats["goals_against"] >= 1.0:
-        over_reasons.append("defensas con margen para conceder")
-
-    if home_stats["goals_for"] >= 1.1:
-        btts_reasons.append("el local suele marcar")
-    if away_stats["goals_for"] >= 1.1:
-        btts_reasons.append("el visitante suele marcar")
-    if home_stats["goals_against"] >= 0.8:
-        btts_reasons.append("el local también concede")
-    if away_stats["goals_against"] >= 0.8:
-        btts_reasons.append("el visitante también concede")
-
-    if not home_reasons:
-        home_reasons = ["mejor encaje general", "más estabilidad", "mejor contexto"]
-    if not away_reasons:
-        away_reasons = ["mejor encaje general", "más estabilidad", "mejor contexto"]
-    if not over_reasons:
-        over_reasons = ["ritmo ofensivo razonable", "partido abierto", "contexto favorable al gol"]
-    if not btts_reasons:
-        btts_reasons = ["dos ataques con capacidad de marcar", "defensas mejorables", "partido propenso al intercambio de goles"]
+    p_btts = clamp(0.40 + (balance * 0.16), 0.28, 0.68)
 
     return {
         "p_home": p_home,
         "p_away": p_away,
-        "p_over25": over25_prob,
-        "p_btts_yes": btts_prob,
-        "home_reasons": home_reasons[:3],
-        "away_reasons": away_reasons[:3],
-        "over_reasons": over_reasons[:3],
-        "btts_reasons": btts_reasons[:3],
+        "p_draw": p_draw,
+        "p_over25": p_over25,
+        "p_btts_yes": p_btts,
+        "avg_home_odds": avg_home,
+        "avg_away_odds": avg_away,
+        "avg_draw_odds": avg_draw,
+        "avg_over25_odds": avg_over25,
     }
+
+
+def build_reasons(consensus: Dict[str, float], side: str) -> List[str]:
+    p_home = consensus["p_home"]
+    p_away = consensus["p_away"]
+    reasons: List[str] = []
+
+    if side == "home":
+        if p_home > p_away:
+            reasons.append("mejor consenso de mercado")
+        if abs(p_home - p_away) > 0.08:
+            reasons.append("ventaja clara en probabilidad implícita")
+        reasons.append("mejor encaje prepartido")
+    elif side == "away":
+        if p_away > p_home:
+            reasons.append("mejor consenso de mercado")
+        if abs(p_away - p_home) > 0.08:
+            reasons.append("ventaja clara en probabilidad implícita")
+        reasons.append("perfil competitivo favorable")
+    elif side == "over25":
+        reasons.extend([
+            "línea de goles favorable",
+            "partido con perfil abierto",
+            "probabilidad de over por encima del umbral",
+        ])
+    elif side == "btts":
+        reasons.extend([
+            "partido equilibrado",
+            "intercambio de goles plausible",
+            "modelo interno favorable",
+        ])
+
+    return reasons[:3]
 
 
 def classify_pick_type(odds: float) -> str:
@@ -628,29 +422,36 @@ def valid_by_type(pick_type: str, edge: float, model_prob: float) -> bool:
     return False
 
 
-def build_tipster_explanation(label: str, reasons: List[str], model_prob: float, implied_prob: float, odds: float) -> str:
+def build_tipster_explanation(label: str, reasons: List[str], model_prob: float, implied_prob: float, odds: float, source_type: str) -> str:
     edge = round((model_prob - implied_prob) * 100, 1)
     joined = ", ".join(reasons[:3])
+
+    if source_type == "real_odds":
+        return (
+            f"{label} entra por {joined}. "
+            f"La cuota {round(odds, 2)} implica un {round(implied_prob * 100, 1)}%, "
+            f"y el modelo la estima en {round(model_prob * 100, 1)}%. "
+            f"Value estimado: {edge:+.1f}%."
+        )
+
     return (
         f"{label} entra por {joined}. "
-        f"La cuota {round(odds, 2)} implica un {round(implied_prob * 100, 1)}%, "
-        f"pero el modelo lo estima en {round(model_prob * 100, 1)}%. "
-        f"Value estimado: {edge:+.1f}%."
+        f"No había mercado utilizable para este pick, así que se usa el modelo interno. "
+        f"Probabilidad estimada: {round(model_prob * 100, 1)}%."
     )
 
 
 def build_candidate(
-    fixture_id: int,
+    event: Dict[str, Any],
     competition: str,
     country: str,
-    league_id: int,
     match: str,
     starts_at: str,
     pick: str,
     market_group: str,
     odds: float,
     model_prob: float,
-    implied_prob: float,
+    implied_prob_: float,
     confidence: str,
     pick_type: str,
     bookmaker: str,
@@ -660,19 +461,19 @@ def build_candidate(
     source_type: str,
 ) -> Dict[str, Any]:
     return {
-        "fixture_id": fixture_id,
+        "fixture_id": event.get("id"),
         "competition": competition,
         "country": country,
-        "league_id": league_id,
-        "league_priority": league_priority(league_id),
+        "league_id": event.get("sport_key"),
+        "league_priority": sport_priority(event.get("sport_key", "")),
         "match": match,
         "starts_at": starts_at,
         "pick": pick,
         "market_group": market_group,
         "odds": round(odds, 2),
         "model_probability": round(model_prob * 100, 1),
-        "implied_probability": round(implied_prob * 100, 1),
-        "value_edge": round((model_prob - implied_prob) * 100, 1),
+        "implied_probability": round(implied_prob_ * 100, 1),
+        "value_edge": round((model_prob - implied_prob_) * 100, 1),
         "confidence": confidence,
         "type": pick_type,
         "bookmaker": bookmaker,
@@ -683,215 +484,147 @@ def build_candidate(
     }
 
 
-def build_model_fallback_candidate(
-    fixture_id: int,
-    competition: str,
-    country: str,
-    league_id: int,
-    match: str,
-    starts_at: str,
-    model: Dict[str, Any],
-    home_name: str,
-    away_name: str,
-) -> Dict[str, Any]:
-    options = [
-        {
-            "pick": f"Gana {home_name}",
-            "market_group": "winner",
-            "prob": model["p_home"],
-            "reasons": model["home_reasons"],
-        },
-        {
-            "pick": f"Gana {away_name}",
-            "market_group": "winner",
-            "prob": model["p_away"],
-            "reasons": model["away_reasons"],
-        },
-        {
-            "pick": "Más de 2.5 goles",
-            "market_group": "over_2_5",
-            "prob": model["p_over25"],
-            "reasons": model["over_reasons"],
-        },
-        {
-            "pick": "Ambos marcan: Sí",
-            "market_group": "btts_yes",
-            "prob": model["p_btts_yes"],
-            "reasons": model["btts_reasons"],
-        },
-    ]
-
-    best = max(options, key=lambda x: x["prob"])
-    model_prob = best["prob"]
-    estimated_odds = clamp(round(1.0 / max(model_prob, 0.18), 2), 1.45, 4.50)
-    imp = implied_probability(estimated_odds)
-    edge = model_prob - imp
-    pick_type = classify_pick_type(estimated_odds)
-    confidence = confidence_from_edge(edge, model_prob)
-
-    explanation = (
-        f"{best['pick']} entra por {', '.join(best['reasons'])}. "
-        f"No había odds utilizables en la API para este fixture, así que se usa el modelo interno. "
-        f"Probabilidad estimada del modelo: {round(model_prob * 100, 1)}%."
-    )
-
-    return build_candidate(
-        fixture_id=fixture_id,
-        competition=competition,
-        country=country,
-        league_id=league_id,
-        match=match,
-        starts_at=starts_at,
-        pick=best["pick"],
-        market_group=best["market_group"],
-        odds=estimated_odds,
-        model_prob=model_prob,
-        implied_prob=imp,
-        confidence=confidence,
-        pick_type=pick_type,
-        bookmaker="MODEL",
-        market_name="IA Pick",
-        explanation=explanation,
-        score=score_pick(edge, model_prob, pick_type),
-        source_type="model_fallback",
-    )
-
-
 def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
-    fixtures = get_upcoming_fixtures()
+    events = get_upcoming_fixtures()
     strong_candidates: List[Dict[str, Any]] = []
     fallback_candidates: List[Dict[str, Any]] = []
 
-    for item in fixtures:
-        fixture = item.get("fixture", {})
-        league = item.get("league", {})
-        teams = item.get("teams", {})
-        fixture_id = fixture.get("id")
-        if not fixture_id:
-            continue
-
-        prediction = get_prediction(fixture_id)
-        markets = get_match_markets(fixture_id)
-
-        home_name = teams["home"]["name"]
-        away_name = teams["away"]["name"]
+    for event in events:
+        competition = event.get("sport_title", TARGET_SPORTS.get(event.get("sport_key", ""), {}).get("title", "Competition"))
+        country = "N/D"
+        home_name = event.get("home_team", "Local")
+        away_name = event.get("away_team", "Visitante")
         match = f"{home_name} vs {away_name}"
+        starts_at = iso_to_local_hhmm(event.get("commence_time"))
 
-        model = build_match_model(item, prediction)
-        starts_at = iso_to_local_hhmm(fixture["date"])
-        competition = league.get("name")
-        country = league.get("country")
-        league_id = league.get("id", 0)
+        consensus = build_market_consensus(event)
 
-        if not markets:
-            candidate = build_model_fallback_candidate(
-                fixture_id=fixture_id,
-                competition=competition,
-                country=country,
-                league_id=league_id,
-                match=match,
-                starts_at=starts_at,
-                model=model,
-                home_name=home_name,
-                away_name=away_name,
+        h2h_market = get_best_h2h_market(event)
+        totals_market = get_best_totals_market(event, target_point=2.5)
+
+        if h2h_market:
+            outcomes = h2h_market["outcomes"]
+
+            home_odds = None
+            away_odds = None
+            for outcome in outcomes:
+                price = safe_float(outcome.get("price"))
+                if price is None:
+                    continue
+                if outcome.get("name") == home_name:
+                    home_odds = price
+                elif outcome.get("name") == away_name:
+                    away_odds = price
+
+            if home_odds and 1.45 <= home_odds <= 8.00:
+                p = consensus["p_home"]
+                imp = implied_probability(home_odds)
+                edge = p - imp
+                pick_type = classify_pick_type(home_odds)
+                conf = confidence_from_edge(edge, p)
+                candidate = build_candidate(
+                    event, competition, country, match, starts_at,
+                    f"Gana {home_name}", "winner",
+                    home_odds, p, imp, conf, pick_type,
+                    h2h_market["bookmaker"], "h2h",
+                    build_tipster_explanation(
+                        f"Gana {home_name}",
+                        build_reasons(consensus, "home"),
+                        p, imp, home_odds, "real_odds"
+                    ),
+                    score_pick(edge, p, pick_type),
+                    "real_odds",
+                )
+                fallback_candidates.append(candidate)
+                if valid_by_type(pick_type, edge, p):
+                    strong_candidates.append(candidate)
+
+            if away_odds and 1.45 <= away_odds <= 8.00:
+                p = consensus["p_away"]
+                imp = implied_probability(away_odds)
+                edge = p - imp
+                pick_type = classify_pick_type(away_odds)
+                conf = confidence_from_edge(edge, p)
+                candidate = build_candidate(
+                    event, competition, country, match, starts_at,
+                    f"Gana {away_name}", "winner",
+                    away_odds, p, imp, conf, pick_type,
+                    h2h_market["bookmaker"], "h2h",
+                    build_tipster_explanation(
+                        f"Gana {away_name}",
+                        build_reasons(consensus, "away"),
+                        p, imp, away_odds, "real_odds"
+                    ),
+                    score_pick(edge, p, pick_type),
+                    "real_odds",
+                )
+                fallback_candidates.append(candidate)
+                if valid_by_type(pick_type, edge, p):
+                    strong_candidates.append(candidate)
+
+        if totals_market:
+            over = totals_market.get("over")
+            over_odds = safe_float(over.get("price")) if over else None
+            if over_odds and 1.45 <= over_odds <= 8.00:
+                p = consensus["p_over25"]
+                imp = implied_probability(over_odds)
+                edge = p - imp
+                pick_type = classify_pick_type(over_odds)
+                conf = confidence_from_edge(edge, p)
+                candidate = build_candidate(
+                    event, competition, country, match, starts_at,
+                    "Más de 2.5 goles", "over_2_5",
+                    over_odds, p, imp, conf, pick_type,
+                    totals_market["bookmaker"], "totals_2.5",
+                    build_tipster_explanation(
+                        "Más de 2.5 goles",
+                        build_reasons(consensus, "over25"),
+                        p, imp, over_odds, "real_odds"
+                    ),
+                    score_pick(edge, p, pick_type),
+                    "real_odds",
+                )
+                fallback_candidates.append(candidate)
+                if valid_by_type(pick_type, edge, p):
+                    strong_candidates.append(candidate)
+
+        # Fallback por evento si no hubo mercado utilizable
+        event_has_candidate = any(c["fixture_id"] == event.get("id") for c in fallback_candidates)
+        if not event_has_candidate:
+            # Elegimos el mejor ángulo del modelo
+            options = [
+                ("winner", f"Gana {home_name}", consensus["p_home"], build_reasons(consensus, "home")),
+                ("winner", f"Gana {away_name}", consensus["p_away"], build_reasons(consensus, "away")),
+                ("over_2_5", "Más de 2.5 goles", consensus["p_over25"], build_reasons(consensus, "over25")),
+                ("btts_yes", "Ambos marcan: Sí", consensus["p_btts_yes"], build_reasons(consensus, "btts")),
+            ]
+            market_group, pick, p, reasons = max(options, key=lambda x: x[2])
+            estimated_odds = clamp(round(1 / max(p, 0.18), 2), 1.45, 4.50)
+            imp = implied_probability(estimated_odds)
+            edge = p - imp
+            pick_type = classify_pick_type(estimated_odds)
+            conf = confidence_from_edge(edge, p)
+
+            candidate = build_candidate(
+                event, competition, country, match, starts_at,
+                pick, market_group,
+                estimated_odds, p, imp, conf, pick_type,
+                "MODEL", "IA Pick",
+                build_tipster_explanation(pick, reasons, p, imp, estimated_odds, "model_fallback"),
+                score_pick(edge, p, pick_type),
+                "model_fallback",
             )
             fallback_candidates.append(candidate)
             strong_candidates.append(candidate)
-            continue
-
-        for market in markets:
-            bookmaker = market["bookmaker"]
-            market_name = market["market_name"]
-            market_type = market["market_type"]
-
-            if market_type == "winner":
-                home_odds = market["values"]["home"]
-                away_odds = market["values"]["away"]
-
-                if 1.45 <= home_odds <= 8.00:
-                    p = model["p_home"]
-                    imp = implied_probability(home_odds)
-                    edge = p - imp
-                    pick_type = classify_pick_type(home_odds)
-                    conf = confidence_from_edge(edge, p)
-                    candidate = build_candidate(
-                        fixture_id, competition, country, league_id, match, starts_at,
-                        f"Gana {home_name}", "winner",
-                        home_odds, p, imp, conf, pick_type, bookmaker, market_name,
-                        build_tipster_explanation(f"Gana {home_name}", model["home_reasons"], p, imp, home_odds),
-                        score_pick(edge, p, pick_type),
-                        "real_odds",
-                    )
-                    fallback_candidates.append(candidate)
-                    if valid_by_type(pick_type, edge, p):
-                        strong_candidates.append(candidate)
-
-                if 1.45 <= away_odds <= 8.00:
-                    p = model["p_away"]
-                    imp = implied_probability(away_odds)
-                    edge = p - imp
-                    pick_type = classify_pick_type(away_odds)
-                    conf = confidence_from_edge(edge, p)
-                    candidate = build_candidate(
-                        fixture_id, competition, country, league_id, match, starts_at,
-                        f"Gana {away_name}", "winner",
-                        away_odds, p, imp, conf, pick_type, bookmaker, market_name,
-                        build_tipster_explanation(f"Gana {away_name}", model["away_reasons"], p, imp, away_odds),
-                        score_pick(edge, p, pick_type),
-                        "real_odds",
-                    )
-                    fallback_candidates.append(candidate)
-                    if valid_by_type(pick_type, edge, p):
-                        strong_candidates.append(candidate)
-
-            elif market_type == "over_2_5":
-                over_odds = market["values"]["over_2_5"]
-                if over_odds and 1.45 <= over_odds <= 8.00:
-                    p = model["p_over25"]
-                    imp = implied_probability(over_odds)
-                    edge = p - imp
-                    pick_type = classify_pick_type(over_odds)
-                    conf = confidence_from_edge(edge, p)
-                    candidate = build_candidate(
-                        fixture_id, competition, country, league_id, match, starts_at,
-                        "Más de 2.5 goles", "over_2_5",
-                        over_odds, p, imp, conf, pick_type, bookmaker, market_name,
-                        build_tipster_explanation("Más de 2.5 goles", model["over_reasons"], p, imp, over_odds),
-                        score_pick(edge, p, pick_type),
-                        "real_odds",
-                    )
-                    fallback_candidates.append(candidate)
-                    if valid_by_type(pick_type, edge, p):
-                        strong_candidates.append(candidate)
-
-            elif market_type == "btts_yes":
-                yes_odds = market["values"]["yes"]
-                if yes_odds and 1.45 <= yes_odds <= 8.00:
-                    p = model["p_btts_yes"]
-                    imp = implied_probability(yes_odds)
-                    edge = p - imp
-                    pick_type = classify_pick_type(yes_odds)
-                    conf = confidence_from_edge(edge, p)
-                    candidate = build_candidate(
-                        fixture_id, competition, country, league_id, match, starts_at,
-                        "Ambos marcan: Sí", "btts_yes",
-                        yes_odds, p, imp, conf, pick_type, bookmaker, market_name,
-                        build_tipster_explanation("Ambos marcan: Sí", model["btts_reasons"], p, imp, yes_odds),
-                        score_pick(edge, p, pick_type),
-                        "real_odds",
-                    )
-                    fallback_candidates.append(candidate)
-                    if valid_by_type(pick_type, edge, p):
-                        strong_candidates.append(candidate)
 
     strong_candidates.sort(
         key=lambda x: (
             x["league_priority"],
             x["score"],
             x["value_edge"],
-            x["model_probability"]
+            x["model_probability"],
         ),
-        reverse=True
+        reverse=True,
     )
 
     fallback_candidates.sort(
@@ -899,9 +632,9 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
             x["league_priority"],
             x["score"],
             x["model_probability"],
-            x["odds"]
+            x["odds"],
         ),
-        reverse=True
+        reverse=True,
     )
 
     log("Strong candidates:", len(strong_candidates))
@@ -949,10 +682,7 @@ def select_daily_picks(strong_candidates: List[Dict[str, Any]], fallback_candida
 
 def generate_real_picks() -> Dict[str, Any]:
     candidates = get_candidates()
-    strong_candidates = candidates["strong"]
-    fallback_candidates = candidates["fallback"]
-
-    picks = select_daily_picks(strong_candidates, fallback_candidates)
+    picks = select_daily_picks(candidates["strong"], candidates["fallback"])
 
     now = madrid_now()
     cached_until = now + timedelta(hours=24)
@@ -961,7 +691,7 @@ def generate_real_picks() -> Dict[str, Any]:
         "date": now.strftime("%Y-%m-%d"),
         "generated_at": now.strftime("%H:%M"),
         "cached_until": cached_until.isoformat(),
-        "source": "API + IA fallback",
+        "source": "The Odds API + IA fallback",
         "count": len(picks),
         "picks": picks,
     }
@@ -972,12 +702,32 @@ def generate_real_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v10"}
+    return {"status": "ok", "service": "top-picks-backend-v11-odds-api"}
 
 
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/debug-raw-odds")
+def debug_raw_odds():
+    try:
+        samples = {}
+        for sport_key in list(TARGET_SPORTS.keys())[:5]:
+            data = fetch_events_for_sport(sport_key)
+            samples[sport_key] = {
+                "count": len(data),
+                "sample": data[:1],
+            }
+
+        return {
+            "base_url": ODDS_API_BASE_URL,
+            "regions": REGIONS,
+            "samples": samples,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Debug raw odds error: {str(e)}")
 
 
 @app.get("/debug-top-picks")
@@ -1007,6 +757,6 @@ def top_picks_today(refresh: int = Query(default=0)):
     try:
         return generate_real_picks()
     except requests.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Error API-Football: {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Error The Odds API: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
