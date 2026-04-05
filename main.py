@@ -1,12 +1,16 @@
 import json
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
 import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+
+# =========================================================
+# CONFIG
+# =========================================================
 
 ODDS_API_KEY = os.getenv("ODDS_API_KEY", "").strip()
 BASE_URL = "https://api.the-odds-api.com"
@@ -15,29 +19,14 @@ TZ = pytz.timezone("Europe/Madrid")
 if not ODDS_API_KEY:
     raise RuntimeError("Falta ODDS_API_KEY")
 
-app = FastAPI(title="Top Picks Pro API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 CACHE_FILE = "cache.json"
 HISTORY_FILE = "history.json"
 
-# Cache real: 24 horas
 CACHE_TTL_HOURS = 24
+MAX_PICKS = 12
 
-# Máximo picks a devolver
-MAX_PICKS = 6
-
-# Ventana máxima de búsqueda: hoy hasta 23:59 Madrid
-LOOKAHEAD_HOURS = 24
-
-# Ligas objetivo
+# Si hoy no encuentra nada en estas ligas o mercados, no se rompe:
+# simplemente sigue con las que sí respondan.
 SPORTS: Dict[str, str] = {
     # UEFA / internacionales
     "soccer_uefa_champs_league": "Champions League",
@@ -72,7 +61,7 @@ SPORTS: Dict[str, str] = {
     # Portugal
     "soccer_portugal_primeira_liga": "Primeira Liga",
 
-    # Bélgica / Escocia / Turquía / Brasil / Argentina
+    # Más ligas útiles
     "soccer_belgium_first_div": "Belgian Pro League",
     "soccer_spl": "Scottish Premiership",
     "soccer_turkey_super_league": "Super Lig",
@@ -80,21 +69,20 @@ SPORTS: Dict[str, str] = {
     "soccer_argentina_primera_division": "Primera División Argentina",
 }
 
-# Prioridad de ligas para ordenar
 LEAGUE_PRIORITY: Dict[str, int] = {
     "Champions League": 100,
     "Europa League": 95,
-    "Conference League": 90,
-    "Mundial": 88,
-    "Eurocopa": 86,
+    "Conference League": 92,
+    "Mundial": 90,
+    "Eurocopa": 88,
 
-    "LaLiga": 85,
-    "Premier League": 84,
-    "Serie A": 83,
-    "Bundesliga": 82,
-    "Eredivisie": 81,
-    "Ligue 1": 80,
-    "Primeira Liga": 79,
+    "LaLiga": 86,
+    "Premier League": 85,
+    "Serie A": 84,
+    "Bundesliga": 83,
+    "Eredivisie": 82,
+    "Ligue 1": 81,
+    "Primeira Liga": 80,
 
     "LaLiga Hypermotion": 76,
     "Championship": 75,
@@ -109,48 +97,62 @@ LEAGUE_PRIORITY: Dict[str, int] = {
     "Super Lig": 66,
 }
 
+app = FastAPI(title="Top Picks Pro API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # =========================================================
-# Helpers generales
+# UTILS
 # =========================================================
 
 def now() -> datetime:
     return datetime.now(TZ)
 
 
-def madrid_today_str() -> str:
+def today_str() -> str:
     return now().strftime("%Y-%m-%d")
 
 
-def api(path: str, params: Dict[str, Any]) -> Any:
-    params = dict(params)
-    params["apiKey"] = ODDS_API_KEY
-    r = requests.get(BASE_URL + path, params=params, timeout=25)
-    r.raise_for_status()
-    return r.json()
+def parse_iso_dt(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(TZ)
 
 
-def load_json(file_path: str) -> Any:
-    if not os.path.exists(file_path):
+def normalize_text(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
+
+
+def safe_float(v: Any) -> Optional[float]:
+    try:
+        n = float(v)
+        return n if n > 0 else None
+    except Exception:
+        return None
+
+
+def read_json(path: str) -> Any:
+    if not os.path.exists(path):
         return {}
     try:
-        with open(file_path, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
 
 
-def save_json(file_path: str, data: Any) -> None:
-    with open(file_path, "w", encoding="utf-8") as f:
+def write_json(path: str, data: Any) -> None:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def parse_event_dt(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(TZ)
-
-
-def is_today_in_madrid(dt: datetime) -> bool:
-    return dt.date() == now().date()
+def get_league_priority(name: str) -> int:
+    return LEAGUE_PRIORITY.get(name, 0)
 
 
 def cache_is_valid(cache: Dict[str, Any]) -> bool:
@@ -161,39 +163,37 @@ def cache_is_valid(cache: Dict[str, Any]) -> bool:
     if not generated_at:
         return False
 
+    # Cache vacía no sirve
+    if not cache.get("picks"):
+        return False
+
     try:
         dt = datetime.fromisoformat(generated_at)
     except Exception:
         return False
 
-    return now() - dt < timedelta(hours=CACHE_TTL_HOURS)
+    return (now() - dt) < timedelta(hours=CACHE_TTL_HOURS)
 
 
-def normalize_league_filter(league: Optional[str]) -> str:
-    return (league or "").strip().lower()
+def api(path: str, params: Dict[str, Any]) -> Any:
+    q = dict(params)
+    q["apiKey"] = ODDS_API_KEY
 
-
-def safe_float(v: Any) -> Optional[float]:
-    try:
-        return float(v)
-    except Exception:
-        return None
-
-
-def get_league_priority(league_name: str) -> int:
-    return LEAGUE_PRIORITY.get(league_name, 0)
+    r = requests.get(BASE_URL + path, params=q, timeout=25)
+    r.raise_for_status()
+    return r.json()
 
 
 # =========================================================
-# Fetch de eventos
+# FETCH
 # =========================================================
 
 def get_events_today() -> List[Dict[str, Any]]:
     """
-    Coge únicamente partidos de HOY en horario Madrid,
-    y solo de las ligas incluidas en SPORTS.
+    Solo partidos del día de hoy en horario Madrid.
+    No rompe si alguna liga falla.
     """
-    all_events: List[Dict[str, Any]] = []
+    events: List[Dict[str, Any]] = []
 
     for sport_key, league_name in SPORTS.items():
         try:
@@ -206,56 +206,30 @@ def get_events_today() -> List[Dict[str, Any]]:
                     "dateFormat": "iso",
                 },
             )
-
-            for event in data:
-                try:
-                    dt_local = parse_event_dt(event["commence_time"])
-                except Exception:
-                    continue
-
-                if not is_today_in_madrid(dt_local):
-                    continue
-
-                event["_sport"] = sport_key
-                event["_league"] = league_name
-                event["_dt_local"] = dt_local
-                all_events.append(event)
-
         except Exception:
-            # Si una liga falla, seguimos con las demás
             continue
 
-    return all_events
+        for e in data:
+            try:
+                dt_local = parse_iso_dt(e["commence_time"])
+            except Exception:
+                continue
+
+            # Solo HOY en Madrid
+            if dt_local.date() != now().date():
+                continue
+
+            e["_sport"] = sport_key
+            e["_league"] = league_name
+            e["_dt_local"] = dt_local
+            events.append(e)
+
+    return events
 
 
 # =========================================================
-# Parseo de mercados
+# MARKET PARSERS
 # =========================================================
-
-def get_best_bookmaker(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Elige el primer bookmaker disponible con mercados útiles.
-    """
-    bookmakers = event.get("bookmakers", [])
-    if not bookmakers:
-        return None
-
-    # Preferimos uno que tenga más mercados
-    scored = []
-    for b in bookmakers:
-        keys = {m.get("key") for m in b.get("markets", [])}
-        score = 0
-        if "h2h" in keys:
-            score += 3
-        if "btts" in keys:
-            score += 2
-        if "totals" in keys:
-            score += 2
-        scored.append((score, b))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return scored[0][1] if scored else bookmakers[0]
-
 
 def get_market(bookmaker: Dict[str, Any], key: str) -> Optional[Dict[str, Any]]:
     for m in bookmaker.get("markets", []):
@@ -264,8 +238,29 @@ def get_market(bookmaker: Dict[str, Any], key: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def pick_best_bookmaker(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    bookmakers = event.get("bookmakers", [])
+    if not bookmakers:
+        return None
+
+    ranked = []
+    for b in bookmakers:
+        market_keys = {m.get("key") for m in b.get("markets", [])}
+        score = 0
+        if "h2h" in market_keys:
+            score += 5
+        if "totals" in market_keys:
+            score += 3
+        if "btts" in market_keys:
+            score += 2
+        ranked.append((score, b))
+
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    return ranked[0][1] if ranked else bookmakers[0]
+
+
 def parse_h2h(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    bookmaker = get_best_bookmaker(event)
+    bookmaker = pick_best_bookmaker(event)
     if not bookmaker:
         return None
 
@@ -273,26 +268,28 @@ def parse_h2h(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not market:
         return None
 
-    home = event["home_team"]
-    away = next((t for t in event["teams"] if t != home), None)
-    if not away:
+    home = event.get("home_team")
+    teams = event.get("teams", [])
+    away = next((t for t in teams if t != home), None)
+
+    if not home or not away:
         return None
 
     outcomes = market.get("outcomes", [])
     odds_map = {o.get("name"): safe_float(o.get("price")) for o in outcomes}
 
     return {
+        "bookmaker": bookmaker.get("title", "Bookmaker"),
         "home_team": home,
         "away_team": away,
         "home_odds": odds_map.get(home),
         "away_odds": odds_map.get(away),
         "draw_odds": odds_map.get("Draw"),
-        "bookmaker": bookmaker.get("title", "Bookmaker"),
     }
 
 
 def parse_btts(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    bookmaker = get_best_bookmaker(event)
+    bookmaker = pick_best_bookmaker(event)
     if not bookmaker:
         return None
 
@@ -304,7 +301,7 @@ def parse_btts(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     no_price = None
 
     for o in market.get("outcomes", []):
-        name = str(o.get("name", "")).strip().lower()
+        name = normalize_text(o.get("name"))
         price = safe_float(o.get("price"))
         if name == "yes":
             yes_price = price
@@ -315,14 +312,14 @@ def parse_btts(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     return {
+        "bookmaker": bookmaker.get("title", "Bookmaker"),
         "yes": yes_price,
         "no": no_price,
-        "bookmaker": bookmaker.get("title", "Bookmaker"),
     }
 
 
 def parse_over25(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    bookmaker = get_best_bookmaker(event)
+    bookmaker = pick_best_bookmaker(event)
     if not bookmaker:
         return None
 
@@ -330,62 +327,80 @@ def parse_over25(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not market:
         return None
 
-    over = None
-    under = None
+    over_25 = None
+    under_25 = None
 
     for o in market.get("outcomes", []):
-        name = str(o.get("name", "")).strip().lower()
+        name = normalize_text(o.get("name"))
         point = safe_float(o.get("point"))
         price = safe_float(o.get("price"))
 
         if point == 2.5:
             if "over" in name:
-                over = price
+                over_25 = price
             elif "under" in name:
-                under = price
+                under_25 = price
 
-    if over is None and under is None:
+    if over_25 is None and under_25 is None:
         return None
 
     return {
-        "over_2_5": over,
-        "under_2_5": under,
         "bookmaker": bookmaker.get("title", "Bookmaker"),
+        "over_2_5": over_25,
+        "under_2_5": under_25,
     }
 
 
 # =========================================================
-# Lógica de pick
+# SCORING / RANKING
 # =========================================================
-
-def implied_probability(decimal_odds: Optional[float]) -> Optional[float]:
-    if not decimal_odds or decimal_odds <= 1:
-        return None
-    return round(100 / decimal_odds, 2)
-
 
 def confidence_from_odds(odds: float, market_type: str, league: str) -> int:
     """
-    Heurística simple para dar una confianza consistente.
+    No descarta por cuota.
+    Solo estima confianza de forma razonable.
     """
-    base = 0
+    base_map = {
+        "winner": 73,
+        "over_2_5": 70,
+        "btts_yes": 69,
+    }
+    base = base_map.get(market_type, 68)
 
-    if market_type == "winner":
-        base = 74
-    elif market_type == "btts_yes":
-        base = 70
-    elif market_type == "over_2_5":
-        base = 71
-    else:
-        base = 68
+    # Menor cuota = mayor probabilidad implícita
+    implied = 100 / odds if odds > 1 else 40
+    implied_component = int(round((implied - 40) * 0.55))
 
-    # Cuanto más baja la cuota, más confianza
-    odds_adjust = int(round((2.20 - odds) * 12))
-    league_adjust = 2 if get_league_priority(league) >= 80 else 0
+    league_bonus = 2 if get_league_priority(league) >= 80 else 0
 
-    conf = base + odds_adjust + league_adjust
-    return max(55, min(conf, 89))
+    conf = base + implied_component + league_bonus
+    return max(55, min(conf, 90))
 
+
+def market_priority(pick_type: str) -> int:
+    # Mi orden:
+    # 1) Over 2.5
+    # 2) BTTS
+    # 3) Winner
+    return {
+        "over_2_5": 3,
+        "btts_yes": 2,
+        "winner": 1,
+    }.get(pick_type, 0)
+
+
+def fit_score_for_odds(odds: float) -> float:
+    """
+    Preferencia por cuotas útiles para picks visibles.
+    Ideal cerca de 1.65-1.95, pero no se descarta ninguna.
+    """
+    ideal = 1.80
+    return -abs(ideal - odds)
+
+
+# =========================================================
+# TIPSTER EXPLANATION
+# =========================================================
 
 def tipster_explanation(
     league: str,
@@ -399,83 +414,96 @@ def tipster_explanation(
 ) -> str:
     parts: List[str] = []
 
-    if pick_type == "winner" and h2h_data:
-        home_odds = h2h_data.get("home_odds")
-        away_odds = h2h_data.get("away_odds")
-        draw_odds = h2h_data.get("draw_odds")
+    parts.append(f"{league}: {home} vs {away}.")
 
-        parts.append(
-            f"En {league}, el mercado 1X2 marca favorito claro."
-        )
+    if h2h_data:
+        h = h2h_data.get("home_odds")
+        d = h2h_data.get("draw_odds")
+        a = h2h_data.get("away_odds")
 
-        if home_odds and away_odds:
+        h2h_bits = []
+        if h:
+            h2h_bits.append(f"1 en {h}")
+        if d:
+            h2h_bits.append(f"X en {d}")
+        if a:
+            h2h_bits.append(f"2 en {a}")
+
+        if h2h_bits:
+            parts.append("Mercado 1X2: " + ", ".join(h2h_bits) + ".")
+
+    if pick_type == "winner":
+        fav = None
+        if h2h_data:
+            ho = h2h_data.get("home_odds")
+            ao = h2h_data.get("away_odds")
+            if ho and ao:
+                fav = home if ho < ao else away
+
+        if fav:
             parts.append(
-                f"Cuotas principales: {home} {home_odds}, {away} {away_odds}"
-                + (f", empate {draw_odds}" if draw_odds else "")
-                + "."
+                f"El pick va con {fav} porque sale como favorito por cuota en el mercado principal."
             )
-
-        parts.append(
-            "Se elige ganador porque es la línea con mejor ventaja relativa y menor dispersión."
-        )
-
-    elif pick_type == "btts_yes" and btts_data:
-        yes = btts_data.get("yes")
-        no = btts_data.get("no")
-
-        parts.append(
-            f"En {league}, el mercado de ambos marcan presenta precio competitivo."
-        )
-
-        if yes:
+        else:
             parts.append(
-                f"BTTS Sí está en {yes}"
-                + (f" frente a BTTS No en {no}" if no else "")
-                + "."
+                "Se prioriza ganador porque es el mercado más estable disponible en este partido."
             )
 
         if over_data and over_data.get("over_2_5"):
+            parts.append(f"El +2.5 aparece en {over_data['over_2_5']}.")
+        if btts_data and btts_data.get("yes"):
+            parts.append(f"BTTS Sí aparece en {btts_data['yes']}.")
+
+    elif pick_type == "btts_yes":
+        yes = btts_data.get("yes") if btts_data else None
+        no = btts_data.get("no") if btts_data else None
+
+        if yes:
+            txt = f"BTTS Sí en {yes}"
+            if no:
+                txt += f" frente a BTTS No en {no}"
+            parts.append(txt + ".")
+
+        if over_data and over_data.get("over_2_5"):
             parts.append(
-                f"Además, el Over 2.5 acompaña en {over_data['over_2_5']}, señal de partido abierto."
+                f"Además, el Over 2.5 está en {over_data['over_2_5']}, reforzando escenario de goles de ambos lados."
+            )
+        else:
+            parts.append(
+                "Se elige ambos marcan por mejor relación entre probabilidad implícita y precio."
             )
 
-        parts.append(
-            "Se prioriza BTTS porque ofrece equilibrio entre probabilidad y cuota."
-        )
-
-    elif pick_type == "over_2_5" and over_data:
-        over = over_data.get("over_2_5")
-        under = over_data.get("under_2_5")
-
-        parts.append(
-            f"En {league}, el mercado de goles favorece el +2.5."
-        )
+    elif pick_type == "over_2_5":
+        over = over_data.get("over_2_5") if over_data else None
+        under = over_data.get("under_2_5") if over_data else None
 
         if over:
-            parts.append(
-                f"Over 2.5 en {over}"
-                + (f" frente a Under 2.5 en {under}" if under else "")
-                + "."
-            )
+            txt = f"Over 2.5 en {over}"
+            if under:
+                txt += f" frente a Under 2.5 en {under}"
+            parts.append(txt + ".")
 
         if btts_data and btts_data.get("yes"):
             parts.append(
-                f"El BTTS Sí también aparece en {btts_data['yes']}, reforzando un escenario con intercambio de goles."
+                f"El BTTS Sí en {btts_data['yes']} acompaña un perfil de partido abierto."
+            )
+        else:
+            parts.append(
+                "Se selecciona +2.5 porque el mercado de goles ofrece la señal más interesante del encuentro."
             )
 
-        parts.append(
-            "Se selecciona Over 2.5 por perfil de cuota sólida y contexto ofensivo del mercado."
-        )
+    parts.append(f"Cuota elegida: {odds}.")
+    return " ".join(parts)
 
-    else:
-        parts.append("Pick seleccionado por mejor relación cuota/probabilidad disponible.")
 
-    return " ".join(parts).strip()
-
+# =========================================================
+# CANDIDATES
+# =========================================================
 
 def build_candidates(event: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    Genera candidatos de mercados para el evento.
+    No descarta por rango de cuotas.
+    Si hay H2H válido, el partido ya puede generar pick.
     """
     h2h_data = parse_h2h(event)
     btts_data = parse_btts(event)
@@ -489,120 +517,115 @@ def build_candidates(event: Dict[str, Any]) -> List[Dict[str, Any]]:
     league = event["_league"]
     dt_local = event["_dt_local"]
 
-    candidates: List[Dict[str, Any]] = []
-
-    # ---------- Winner ----------
     home_odds = h2h_data.get("home_odds")
     away_odds = h2h_data.get("away_odds")
     draw_odds = h2h_data.get("draw_odds")
 
-    if home_odds and away_odds:
+    candidates: List[Dict[str, Any]] = []
+
+    # winner
+    if home_odds and away_odds and home_odds > 1 and away_odds > 1:
         fav = home if home_odds < away_odds else away
         fav_odds = min(home_odds, away_odds)
 
-        # Evitamos picks absurdamente bajos o muy largos
-        if 1.30 <= fav_odds <= 2.10:
-            conf = confidence_from_odds(fav_odds, "winner", league)
-            candidates.append({
-                "id": event["id"],
-                "match": f"{home} vs {away}",
-                "league": league,
-                "time_local": dt_local.strftime("%H:%M"),
-                "kickoff_iso": dt_local.isoformat(),
-                "pick": f"Gana {fav}",
-                "pick_type": "winner",
-                "odds": round(fav_odds, 2),
-                "confidence": conf,
-                "home_team": home,
-                "away_team": away,
-                "status": "pending",
-                "score_line": "",
-                "bookmaker": h2h_data.get("bookmaker", "Bookmaker"),
-                "tipster_explanation": tipster_explanation(
-                    league, home, away, "winner", fav_odds, h2h_data, btts_data, over_data
-                ),
-                "market_snapshot": {
-                    "home_odds": home_odds,
-                    "away_odds": away_odds,
-                    "draw_odds": draw_odds,
-                    "btts_yes": btts_data.get("yes") if btts_data else None,
-                    "over_2_5": over_data.get("over_2_5") if over_data else None,
-                }
-            })
+        candidates.append({
+            "id": event["id"],
+            "match": f"{home} vs {away}",
+            "league": league,
+            "time_local": dt_local.strftime("%H:%M"),
+            "kickoff_iso": dt_local.isoformat(),
+            "pick": f"Gana {fav}",
+            "pick_type": "winner",
+            "odds": round(fav_odds, 2),
+            "confidence": confidence_from_odds(fav_odds, "winner", league),
+            "home_team": home,
+            "away_team": away,
+            "status": "pending",
+            "score_line": "",
+            "bookmaker": h2h_data.get("bookmaker", "Bookmaker"),
+            "tipster_explanation": tipster_explanation(
+                league, home, away, "winner", fav_odds, h2h_data, btts_data, over_data
+            ),
+            "market_snapshot": {
+                "home_odds": home_odds,
+                "draw_odds": draw_odds,
+                "away_odds": away_odds,
+                "btts_yes": btts_data.get("yes") if btts_data else None,
+                "over_2_5": over_data.get("over_2_5") if over_data else None,
+            }
+        })
 
-    # ---------- BTTS ----------
-    if btts_data and btts_data.get("yes"):
+    # btts
+    if btts_data and btts_data.get("yes") and btts_data["yes"] > 1:
         btts_yes = btts_data["yes"]
-        if 1.45 <= btts_yes <= 2.05:
-            conf = confidence_from_odds(btts_yes, "btts_yes", league)
-            candidates.append({
-                "id": event["id"],
-                "match": f"{home} vs {away}",
-                "league": league,
-                "time_local": dt_local.strftime("%H:%M"),
-                "kickoff_iso": dt_local.isoformat(),
-                "pick": "Ambos marcan",
-                "pick_type": "btts_yes",
-                "odds": round(btts_yes, 2),
-                "confidence": conf,
-                "home_team": home,
-                "away_team": away,
-                "status": "pending",
-                "score_line": "",
-                "bookmaker": btts_data.get("bookmaker", "Bookmaker"),
-                "tipster_explanation": tipster_explanation(
-                    league, home, away, "btts_yes", btts_yes, h2h_data, btts_data, over_data
-                ),
-                "market_snapshot": {
-                    "home_odds": home_odds,
-                    "away_odds": away_odds,
-                    "draw_odds": draw_odds,
-                    "btts_yes": btts_yes,
-                    "btts_no": btts_data.get("no"),
-                    "over_2_5": over_data.get("over_2_5") if over_data else None,
-                }
-            })
 
-    # ---------- Over 2.5 ----------
-    if over_data and over_data.get("over_2_5"):
+        candidates.append({
+            "id": event["id"],
+            "match": f"{home} vs {away}",
+            "league": league,
+            "time_local": dt_local.strftime("%H:%M"),
+            "kickoff_iso": dt_local.isoformat(),
+            "pick": "Ambos marcan",
+            "pick_type": "btts_yes",
+            "odds": round(btts_yes, 2),
+            "confidence": confidence_from_odds(btts_yes, "btts_yes", league),
+            "home_team": home,
+            "away_team": away,
+            "status": "pending",
+            "score_line": "",
+            "bookmaker": btts_data.get("bookmaker", "Bookmaker"),
+            "tipster_explanation": tipster_explanation(
+                league, home, away, "btts_yes", btts_yes, h2h_data, btts_data, over_data
+            ),
+            "market_snapshot": {
+                "home_odds": home_odds,
+                "draw_odds": draw_odds,
+                "away_odds": away_odds,
+                "btts_yes": btts_yes,
+                "btts_no": btts_data.get("no"),
+                "over_2_5": over_data.get("over_2_5") if over_data else None,
+            }
+        })
+
+    # over 2.5
+    if over_data and over_data.get("over_2_5") and over_data["over_2_5"] > 1:
         over_25 = over_data["over_2_5"]
-        if 1.50 <= over_25 <= 2.05:
-            conf = confidence_from_odds(over_25, "over_2_5", league)
-            candidates.append({
-                "id": event["id"],
-                "match": f"{home} vs {away}",
-                "league": league,
-                "time_local": dt_local.strftime("%H:%M"),
-                "kickoff_iso": dt_local.isoformat(),
-                "pick": "Más de 2.5 goles",
-                "pick_type": "over_2_5",
-                "odds": round(over_25, 2),
-                "confidence": conf,
-                "home_team": home,
-                "away_team": away,
-                "status": "pending",
-                "score_line": "",
-                "bookmaker": over_data.get("bookmaker", "Bookmaker"),
-                "tipster_explanation": tipster_explanation(
-                    league, home, away, "over_2_5", over_25, h2h_data, btts_data, over_data
-                ),
-                "market_snapshot": {
-                    "home_odds": home_odds,
-                    "away_odds": away_odds,
-                    "draw_odds": draw_odds,
-                    "btts_yes": btts_data.get("yes") if btts_data else None,
-                    "over_2_5": over_25,
-                    "under_2_5": over_data.get("under_2_5"),
-                }
-            })
+
+        candidates.append({
+            "id": event["id"],
+            "match": f"{home} vs {away}",
+            "league": league,
+            "time_local": dt_local.strftime("%H:%M"),
+            "kickoff_iso": dt_local.isoformat(),
+            "pick": "Más de 2.5 goles",
+            "pick_type": "over_2_5",
+            "odds": round(over_25, 2),
+            "confidence": confidence_from_odds(over_25, "over_2_5", league),
+            "home_team": home,
+            "away_team": away,
+            "status": "pending",
+            "score_line": "",
+            "bookmaker": over_data.get("bookmaker", "Bookmaker"),
+            "tipster_explanation": tipster_explanation(
+                league, home, away, "over_2_5", over_25, h2h_data, btts_data, over_data
+            ),
+            "market_snapshot": {
+                "home_odds": home_odds,
+                "draw_odds": draw_odds,
+                "away_odds": away_odds,
+                "btts_yes": btts_data.get("yes") if btts_data else None,
+                "over_2_5": over_25,
+                "under_2_5": over_data.get("under_2_5"),
+            }
+        })
 
     return candidates
 
 
 def deduplicate_event_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Si un mismo partido genera varios mercados, nos quedamos con el mejor por confianza,
-    y en empate por mejor cuota/mercado.
+    Un partido = un pick.
+    Se queda con el mejor mercado del partido.
     """
     grouped: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -614,9 +637,10 @@ def deduplicate_event_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[
     for _, arr in grouped.items():
         arr.sort(
             key=lambda x: (
+                market_priority(x["pick_type"]),
                 x["confidence"],
                 get_league_priority(x["league"]),
-                -abs(1.75 - x["odds"])  # preferencia a cuotas cercanas a 1.75
+                fit_score_for_odds(x["odds"]),
             ),
             reverse=True,
         )
@@ -625,24 +649,84 @@ def deduplicate_event_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[
     return chosen
 
 
+def fallback_winner_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Fallback duro: si existe H2H, genera sí o sí pick ganador.
+    """
+    h2h_data = parse_h2h(event)
+    if not h2h_data:
+        return None
+
+    home = h2h_data["home_team"]
+    away = h2h_data["away_team"]
+    home_odds = h2h_data.get("home_odds")
+    away_odds = h2h_data.get("away_odds")
+    draw_odds = h2h_data.get("draw_odds")
+
+    if not home_odds or not away_odds:
+        return None
+
+    fav = home if home_odds < away_odds else away
+    fav_odds = min(home_odds, away_odds)
+    league = event["_league"]
+    dt_local = event["_dt_local"]
+
+    return {
+        "id": event["id"],
+        "match": f"{home} vs {away}",
+        "league": league,
+        "time_local": dt_local.strftime("%H:%M"),
+        "kickoff_iso": dt_local.isoformat(),
+        "pick": f"Gana {fav}",
+        "pick_type": "winner",
+        "odds": round(fav_odds, 2),
+        "confidence": confidence_from_odds(fav_odds, "winner", league),
+        "home_team": home,
+        "away_team": away,
+        "status": "pending",
+        "score_line": "",
+        "bookmaker": h2h_data.get("bookmaker", "Bookmaker"),
+        "tipster_explanation": (
+            f"{league}: {home} vs {away}. "
+            f"Fallback del modelo: se juega ganador porque {fav} sale favorito en la cuota principal. "
+            f"Mercado 1X2 con {home} en {home_odds}, empate en {draw_odds}, {away} en {away_odds}. "
+            f"Cuota elegida: {round(fav_odds, 2)}."
+        ),
+        "market_snapshot": {
+            "home_odds": home_odds,
+            "draw_odds": draw_odds,
+            "away_odds": away_odds,
+        }
+    }
+
+
 def select_best_picks(events: List[Dict[str, Any]], league_filter: Optional[str] = None) -> List[Dict[str, Any]]:
     all_candidates: List[Dict[str, Any]] = []
 
     for event in events:
-        event_candidates = build_candidates(event)
-        all_candidates.extend(event_candidates)
+        all_candidates.extend(build_candidates(event))
 
     picks = deduplicate_event_candidates(all_candidates)
 
-    league_filter_norm = normalize_league_filter(league_filter)
-    if league_filter_norm:
-        picks = [p for p in picks if league_filter_norm in p["league"].lower()]
+    # Si no hay picks por mercados avanzados, hacemos fallback a winner
+    if not picks:
+        fallback_picks: List[Dict[str, Any]] = []
+        for event in events:
+            p = fallback_winner_from_event(event)
+            if p:
+                fallback_picks.append(p)
+        picks = fallback_picks
+
+    if league_filter:
+        lf = normalize_text(league_filter)
+        picks = [p for p in picks if lf in normalize_text(p.get("league"))]
 
     picks.sort(
         key=lambda x: (
             get_league_priority(x["league"]),
             x["confidence"],
-            -abs(1.75 - x["odds"])
+            market_priority(x["pick_type"]),
+            fit_score_for_odds(x["odds"]),
         ),
         reverse=True,
     )
@@ -651,65 +735,52 @@ def select_best_picks(events: List[Dict[str, Any]], league_filter: Optional[str]
 
 
 # =========================================================
-# Resultados e historial
+# RESULTS / HISTORY
 # =========================================================
 
 def resolve_pick_result(pick: Dict[str, Any], scores: List[Dict[str, Any]]) -> str:
-    """
-    scores esperado tipo:
-    [
-      {"name": "Equipo A", "score": "2"},
-      {"name": "Equipo B", "score": "1"}
-    ]
-    """
     try:
         score_map = {s["name"]: int(s["score"]) for s in scores}
     except Exception:
         return "pending"
 
-    home_team = pick["home_team"]
-    away_team = pick["away_team"]
+    home = pick["home_team"]
+    away = pick["away_team"]
 
-    if home_team not in score_map or away_team not in score_map:
+    if home not in score_map or away not in score_map:
         return "pending"
 
-    h = score_map[home_team]
-    a = score_map[away_team]
+    h = score_map[home]
+    a = score_map[away]
     total = h + a
 
     if pick["pick_type"] == "winner":
         target = pick["pick"].replace("Gana ", "").strip()
-        winner = None
         if h > a:
-            winner = home_team
-        elif a > h:
-            winner = away_team
-        else:
-            return "lost"
-        return "won" if winner == target else "lost"
-
-    if pick["pick_type"] == "over_2_5":
-        return "won" if total >= 3 else "lost"
+            return "won" if target == home else "lost"
+        if a > h:
+            return "won" if target == away else "lost"
+        return "lost"
 
     if pick["pick_type"] == "btts_yes":
         return "won" if h > 0 and a > 0 else "lost"
 
+    if pick["pick_type"] == "over_2_5":
+        return "won" if total >= 3 else "lost"
+
     return "pending"
 
 
-def score_line_from_scores(pick: Dict[str, Any], scores: List[Dict[str, Any]]) -> str:
+def build_score_line(pick: Dict[str, Any], scores: List[Dict[str, Any]]) -> str:
     try:
         score_map = {s["name"]: int(s["score"]) for s in scores}
-        h = score_map[pick["home_team"]]
-        a = score_map[pick["away_team"]]
-        return f"{h}-{a}"
+        return f"{score_map[pick['home_team']]}-{score_map[pick['away_team']]}"
     except Exception:
         return ""
 
 
 def update_results(history: Dict[str, Any]) -> Dict[str, Any]:
-    if not history or "days" not in history:
-        return {"days": {}}
+    history.setdefault("days", {})
 
     for sport_key in SPORTS.keys():
         try:
@@ -726,102 +797,89 @@ def update_results(history: Dict[str, Any]) -> Dict[str, Any]:
         scores_by_id = {s.get("id"): s for s in scores if s.get("id")}
 
         for _, day_data in history.get("days", {}).items():
-            for pick in day_data.get("picks", []):
-                match_score = scores_by_id.get(pick.get("id"))
+            for p in day_data.get("picks", []):
+                match_score = scores_by_id.get(p.get("id"))
                 if not match_score:
                     continue
 
                 if match_score.get("completed"):
-                    result = resolve_pick_result(pick, match_score.get("scores", []))
-                    pick["status"] = result
-                    pick["score_line"] = score_line_from_scores(pick, match_score.get("scores", []))
+                    p["status"] = resolve_pick_result(p, match_score.get("scores", []))
+                    p["score_line"] = build_score_line(p, match_score.get("scores", []))
 
     return history
 
 
-def rebuild_day_stats(history: Dict[str, Any]) -> Dict[str, Any]:
-    for _, day_data in history.get("days", {}).items():
-        picks = day_data.get("picks", [])
-        won = sum(1 for p in picks if p.get("status") == "won")
-        lost = sum(1 for p in picks if p.get("status") == "lost")
-        pending = sum(1 for p in picks if p.get("status") == "pending")
-        day_data["stats"] = {
-            "won": won,
-            "lost": lost,
-            "pending": pending,
-        }
-    return history
-
-
-def merge_today_history(history: Dict[str, Any], today_picks: List[Dict[str, Any]]) -> Dict[str, Any]:
+def rebuild_history_stats(history: Dict[str, Any]) -> Dict[str, Any]:
     history.setdefault("days", {})
-    today_key = madrid_today_str()
 
-    # Sobrescribe picks del día actual para mantenerlos limpios
-    history["days"][today_key] = {
-        "picks": today_picks
-    }
+    for _, day_data in history["days"].items():
+        picks = day_data.get("picks", [])
+        day_data["stats"] = {
+            "won": sum(1 for p in picks if p.get("status") == "won"),
+            "lost": sum(1 for p in picks if p.get("status") == "lost"),
+            "pending": sum(1 for p in picks if p.get("status") == "pending"),
+        }
+
+    return history
+
+
+def merge_today_history(history: Dict[str, Any], picks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    history.setdefault("days", {})
+    history["days"][today_str()] = {"picks": picks}
 
     history = update_results(history)
-    history = rebuild_day_stats(history)
+    history = rebuild_history_stats(history)
     return history
 
 
-def history_as_frontend_array(history: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Convierte:
-    { "days": { "2026-04-05": {...} } }
-    a:
-    { "days": [ {date:..., stats:..., picks:[...]}, ... ] }
-    para que tu frontend lo pinte bien.
-    """
+def history_to_frontend(history: Dict[str, Any]) -> Dict[str, Any]:
     days_obj = history.get("days", {})
-    out = []
+    days_list = []
 
     for day, data in sorted(days_obj.items(), reverse=True):
-        out.append({
+        days_list.append({
             "date": day,
             "stats": data.get("stats", {"won": 0, "lost": 0, "pending": 0}),
             "picks": data.get("picks", []),
         })
 
-    return {"days": out}
+    return {"days": days_list}
 
 
 # =========================================================
-# Cache
+# BUILD PAYLOAD
 # =========================================================
 
-def build_and_store_payload() -> Dict[str, Any]:
+def build_payload() -> Dict[str, Any]:
     events = get_events_today()
     picks = select_best_picks(events)
 
-    history = load_json(HISTORY_FILE)
+    history = read_json(HISTORY_FILE)
     history = merge_today_history(history, picks)
-    save_json(HISTORY_FILE, history)
+    write_json(HISTORY_FILE, history)
 
     payload = {
-        "cache_day": madrid_today_str(),
+        "cache_day": today_str(),
         "generated_at": now().isoformat(),
         "count": len(picks),
         "picks": picks,
     }
 
-    save_json(CACHE_FILE, payload)
+    write_json(CACHE_FILE, payload)
     return payload
 
 
 def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
-    cache = load_json(CACHE_FILE)
+    cache = read_json(CACHE_FILE)
 
-    if not force_refresh and cache and cache_is_valid(cache):
+    if not force_refresh and cache_is_valid(cache):
         return cache
 
-    return build_and_store_payload()
+    return build_payload()
 
 
 # =========================================================
-# API
+# ROUTES
 # =========================================================
 
 @app.get("/")
@@ -839,23 +897,23 @@ def root():
 
 
 @app.get("/api/picks")
-def picks(
+def get_picks(
     force_refresh: bool = Query(False),
     league: Optional[str] = Query(None),
 ):
     try:
         payload = get_cached_or_refresh(force_refresh=force_refresh)
 
-        picks_data = payload.get("picks", [])
+        picks = payload.get("picks", [])
         if league:
-            league_norm = normalize_league_filter(league)
-            picks_data = [p for p in picks_data if league_norm in p.get("league", "").lower()]
+            lf = normalize_text(league)
+            picks = [p for p in picks if lf in normalize_text(p.get("league"))]
 
         return {
             "cache_day": payload.get("cache_day"),
             "generated_at": payload.get("generated_at"),
-            "count": len(picks_data),
-            "picks": picks_data,
+            "count": len(picks),
+            "picks": picks,
         }
 
     except requests.HTTPError as e:
@@ -865,9 +923,9 @@ def picks(
 
 
 @app.get("/api/history")
-def history():
-    raw = load_json(HISTORY_FILE)
+def get_history():
+    raw = read_json(HISTORY_FILE)
     raw = update_results(raw)
-    raw = rebuild_day_stats(raw)
-    save_json(HISTORY_FILE, raw)
-    return history_as_frontend_array(raw)
+    raw = rebuild_history_stats(raw)
+    write_json(HISTORY_FILE, raw)
+    return history_to_frontend(raw)
