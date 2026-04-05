@@ -17,7 +17,7 @@ if not API_KEY:
 
 HEADERS = {"x-apisports-key": API_KEY}
 
-app = FastAPI(title="Top Picks Backend", version="9.0.0")
+app = FastAPI(title="Top Picks Backend", version="10.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -154,7 +154,7 @@ def get_upcoming_fixtures() -> List[Dict[str, Any]]:
             payload = api_get("/fixtures", {
                 "league": league_id,
                 "season": season,
-                "next": 12,
+                "next": 12
             })
         except Exception as e:
             log("Error league", league_id, str(e))
@@ -168,6 +168,8 @@ def get_upcoming_fixtures() -> List[Dict[str, Any]]:
 
             if not fixture_id or fixture_id in seen_fixture_ids:
                 continue
+
+            # solo prepartido
             if status_short not in {"NS", "TBD"}:
                 continue
 
@@ -178,6 +180,7 @@ def get_upcoming_fixtures() -> List[Dict[str, Any]]:
             except Exception:
                 continue
 
+            # permite hoy y próximos; evita partidos claramente pasados
             if fixture_dt < now - timedelta(hours=6):
                 continue
 
@@ -720,11 +723,9 @@ def build_model_fallback_candidate(
 
     best = max(options, key=lambda x: x["prob"])
     model_prob = best["prob"]
-
-    # odds estimadas prudentes, no absurdas
     estimated_odds = clamp(round(1.0 / max(model_prob, 0.18), 2), 1.45, 4.50)
-    implied_prob = implied_probability(estimated_odds)
-    edge = model_prob - implied_prob
+    imp = implied_probability(estimated_odds)
+    edge = model_prob - imp
     pick_type = classify_pick_type(estimated_odds)
     confidence = confidence_from_edge(edge, model_prob)
 
@@ -745,11 +746,11 @@ def build_model_fallback_candidate(
         market_group=best["market_group"],
         odds=estimated_odds,
         model_prob=model_prob,
-        implied_prob=implied_prob,
+        implied_prob=imp,
         confidence=confidence,
         pick_type=pick_type,
         bookmaker="MODEL",
-        market_name="IA Fallback",
+        market_name="IA Pick",
         explanation=explanation,
         score=score_pick(edge, model_prob, pick_type),
         source_type="model_fallback",
@@ -760,9 +761,6 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
     fixtures = get_upcoming_fixtures()
     strong_candidates: List[Dict[str, Any]] = []
     fallback_candidates: List[Dict[str, Any]] = []
-
-    fixtures_with_markets = 0
-    fixtures_with_fallback = 0
 
     for item in fixtures:
         fixture = item.get("fixture", {})
@@ -779,8 +777,6 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
         away_name = teams["away"]["name"]
         match = f"{home_name} vs {away_name}"
 
-        log("Fixture:", fixture_id, match, "| markets:", len(markets))
-
         model = build_match_model(item, prediction)
         starts_at = iso_to_local_hhmm(fixture["date"])
         competition = league.get("name")
@@ -788,7 +784,6 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
         league_id = league.get("id", 0)
 
         if not markets:
-            fixtures_with_fallback += 1
             candidate = build_model_fallback_candidate(
                 fixture_id=fixture_id,
                 competition=competition,
@@ -803,8 +798,6 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
             fallback_candidates.append(candidate)
             strong_candidates.append(candidate)
             continue
-
-        fixtures_with_markets += 1
 
         for market in markets:
             bookmaker = market["bookmaker"]
@@ -911,8 +904,6 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
         reverse=True
     )
 
-    log("Fixtures con markets:", fixtures_with_markets)
-    log("Fixtures con fallback modelo:", fixtures_with_fallback)
     log("Strong candidates:", len(strong_candidates))
     log("Fallback candidates:", len(fallback_candidates))
 
@@ -970,7 +961,7 @@ def generate_real_picks() -> Dict[str, Any]:
         "date": now.strftime("%Y-%m-%d"),
         "generated_at": now.strftime("%H:%M"),
         "cached_until": cached_until.isoformat(),
-        "source": "API-FOOTBALL real fixtures + odds + predictions",
+        "source": "API + IA fallback",
         "count": len(picks),
         "picks": picks,
     }
@@ -981,7 +972,7 @@ def generate_real_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v9"}
+    return {"status": "ok", "service": "top-picks-backend-v10"}
 
 
 @app.get("/health")
@@ -993,77 +984,13 @@ def health():
 def debug_top_picks():
     try:
         fixtures = get_upcoming_fixtures()
-        summary = {
+        candidates = get_candidates()
+        return {
             "fixtures_found": len(fixtures),
-            "fixtures_with_markets": 0,
-            "fixtures_with_model_fallback": 0,
-            "strong_candidates": 0,
-            "fallback_candidates": 0,
-            "fixture_samples": [],
-            "market_samples": [],
+            "strong_candidates": len(candidates["strong"]),
+            "fallback_candidates": len(candidates["fallback"]),
+            "preview": candidates["fallback"][:5],
         }
-
-        strong_candidates = []
-        fallback_candidates = []
-
-        for item in fixtures[:25]:
-            fixture = item.get("fixture", {})
-            league = item.get("league", {})
-            teams = item.get("teams", {})
-            fixture_id = fixture.get("id")
-
-            if not fixture_id:
-                continue
-
-            match = f'{teams.get("home", {}).get("name", "?")} vs {teams.get("away", {}).get("name", "?")}'
-            markets = get_match_markets(fixture_id)
-
-            summary["fixture_samples"].append({
-                "fixture_id": fixture_id,
-                "match": match,
-                "league": league.get("name"),
-                "markets_found": len(markets),
-            })
-
-            prediction = get_prediction(fixture_id)
-            model = build_match_model(item, prediction)
-
-            if not markets:
-                summary["fixtures_with_model_fallback"] += 1
-                fallback = build_model_fallback_candidate(
-                    fixture_id=fixture_id,
-                    competition=league.get("name"),
-                    country=league.get("country"),
-                    league_id=league.get("id", 0),
-                    match=match,
-                    starts_at=iso_to_local_hhmm(fixture["date"]),
-                    model=model,
-                    home_name=teams["home"]["name"],
-                    away_name=teams["away"]["name"],
-                )
-                fallback_candidates.append(fallback)
-                strong_candidates.append(fallback)
-                continue
-
-            summary["fixtures_with_markets"] += 1
-
-            for market in markets[:3]:
-                summary["market_samples"].append({
-                    "fixture_id": fixture_id,
-                    "match": match,
-                    "market_type": market.get("market_type"),
-                    "market_name": market.get("market_name"),
-                    "bookmaker": market.get("bookmaker"),
-                    "values": market.get("values"),
-                })
-
-        summary["strong_candidates"] = len(strong_candidates)
-        summary["fallback_candidates"] = len(fallback_candidates)
-        summary["strong_preview"] = strong_candidates[:5]
-        summary["fallback_preview"] = fallback_candidates[:5]
-
-        return summary
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Debug error: {str(e)}")
 
