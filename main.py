@@ -15,7 +15,7 @@ TZ_NAME = os.getenv("TZ", "Europe/Madrid")
 if not ODDS_API_KEY:
     raise RuntimeError("Falta ODDS_API_KEY en variables de entorno")
 
-app = FastAPI(title="Top Picks Backend", version="21.0.0")
+app = FastAPI(title="Top Picks Backend", version="22.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -168,6 +168,14 @@ def save_cache(data: Dict[str, Any]) -> None:
         pass
 
 
+def clear_cache() -> None:
+    try:
+        if os.path.exists(CACHE_FILE):
+            os.remove(CACHE_FILE)
+    except Exception:
+        pass
+
+
 def load_history() -> Dict[str, Any]:
     if not os.path.exists(HISTORY_FILE):
         return {"days": {}}
@@ -235,7 +243,6 @@ def fetch_scores_for_sport(sport_key: str, days_from: int = 3) -> List[Dict[str,
 
 def get_nearby_fixtures() -> List[Dict[str, Any]]:
     now = madrid_now()
-
     events: List[Dict[str, Any]] = []
     seen = set()
 
@@ -259,7 +266,6 @@ def get_nearby_fixtures() -> List[Dict[str, Any]]:
 
             if dt < now - timedelta(hours=LOOKBACK_HOURS):
                 continue
-
             if dt > now + timedelta(hours=LOOKAHEAD_HOURS):
                 continue
 
@@ -268,17 +274,8 @@ def get_nearby_fixtures() -> List[Dict[str, Any]]:
             events.append(item)
             seen.add(event_id)
 
-    events.sort(
-        key=lambda x: (
-            -x.get("_priority", 10),
-            x.get("_local_dt", "")
-        )
-    )
-
+    events.sort(key=lambda x: (-x.get("_priority", 10), x.get("_local_dt", "")))
     log("Fixtures cercanos encontrados:", len(events))
-    for e in events[:5]:
-        log("DEBUG MATCH:", e.get("home_team"), "vs", e.get("away_team"), e.get("commence_time"))
-
     return events
 
 
@@ -435,19 +432,16 @@ def build_tipster_explanation(label: str, reasons: List[str], odds: float, marke
             f"{label} entra porque {joined}. "
             f"Cuota {round(odds, 2)} interesante para este tramo del día y con contexto suficiente para estar entre los destacados."
         )
-
     if market_group == "over_2_5":
         return (
             f"{label} entra porque {joined}. "
             f"El partido tiene pinta de irse a un guion más abierto de lo normal."
         )
-
     if market_group == "btts_yes":
         return (
             f"{label} entra porque {joined}. "
             f"Es un cruce donde cuesta imaginar a alguno de los dos sin generar daño arriba."
         )
-
     return f"{label} entra porque {joined}."
 
 
@@ -504,7 +498,6 @@ def build_emergency_pick(event: Dict[str, Any]) -> Dict[str, Any]:
     away_name = event.get("away_team", "Visitante")
     match = f"{home_name} vs {away_name}"
     starts_at = iso_to_local_hhmm(event.get("commence_time"))
-
     consensus = build_market_consensus(event)
     h2h_market = get_best_h2h_market(event)
 
@@ -523,7 +516,6 @@ def build_emergency_pick(event: Dict[str, Any]) -> Dict[str, Any]:
             elif outcome.get("name") == away_name:
                 away_odds = price
 
-    # prioridad emergencia: ganador mejor lado, si no over, si no btts
     if home_odds and away_odds:
         if consensus["p_home"] >= consensus["p_away"]:
             odds = home_odds
@@ -569,11 +561,11 @@ def build_emergency_pick(event: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def get_candidates() -> List[Dict[str, Any]]:
-    events = get_nearby_fixtures()
+def get_candidates_and_fixtures() -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    fixtures = get_nearby_fixtures()
     candidates: List[Dict[str, Any]] = []
 
-    for event in events:
+    for event in fixtures:
         competition = event.get(
             "sport_title",
             TARGET_SPORTS.get(event.get("sport_key", ""), {}).get("title", "Competition")
@@ -582,16 +574,13 @@ def get_candidates() -> List[Dict[str, Any]]:
         away_name = event.get("away_team", "Visitante")
         match = f"{home_name} vs {away_name}"
         starts_at = iso_to_local_hhmm(event.get("commence_time"))
-
         consensus = build_market_consensus(event)
         event_candidates: List[Dict[str, Any]] = []
-
         h2h_market = get_best_h2h_market(event)
 
         if h2h_market:
             home_odds = None
             away_odds = None
-
             for outcome in h2h_market["outcomes"]:
                 price = safe_float(outcome.get("price"))
                 if price is None:
@@ -615,12 +604,7 @@ def get_candidates() -> List[Dict[str, Any]]:
                         pick_type,
                         h2h_market["bookmaker"],
                         "h2h",
-                        build_tipster_explanation(
-                            f"Gana {home_name}",
-                            build_reasons("home"),
-                            home_odds,
-                            "winner",
-                        ),
+                        build_tipster_explanation(f"Gana {home_name}", build_reasons("home"), home_odds, "winner"),
                         score_pick(edge, p, pick_type),
                         "real_odds",
                     )
@@ -640,12 +624,7 @@ def get_candidates() -> List[Dict[str, Any]]:
                         pick_type,
                         h2h_market["bookmaker"],
                         "h2h",
-                        build_tipster_explanation(
-                            f"Gana {away_name}",
-                            build_reasons("away"),
-                            away_odds,
-                            "winner",
-                        ),
+                        build_tipster_explanation(f"Gana {away_name}", build_reasons("away"), away_odds, "winner"),
                         score_pick(edge, p, pick_type),
                         "real_odds",
                     )
@@ -666,12 +645,7 @@ def get_candidates() -> List[Dict[str, Any]]:
                     pick_type,
                     "MODEL",
                     "synthetic_totals_2.5",
-                    build_tipster_explanation(
-                        "Más de 2.5 goles",
-                        build_reasons("over25"),
-                        over_odds,
-                        "over_2_5",
-                    ),
+                    build_tipster_explanation("Más de 2.5 goles", build_reasons("over25"), over_odds, "over_2_5"),
                     score_pick(edge, p, pick_type),
                     "model_odds",
                 )
@@ -692,12 +666,7 @@ def get_candidates() -> List[Dict[str, Any]]:
                     pick_type,
                     "MODEL",
                     "synthetic_btts",
-                    build_tipster_explanation(
-                        "Ambos marcan: Sí",
-                        build_reasons("btts"),
-                        btts_odds,
-                        "btts_yes",
-                    ),
+                    build_tipster_explanation("Ambos marcan: Sí", build_reasons("btts"), btts_odds, "btts_yes"),
                     score_pick(edge, p, pick_type),
                     "model_odds",
                 )
@@ -717,7 +686,7 @@ def get_candidates() -> List[Dict[str, Any]]:
         reverse=True,
     )
 
-    return candidates
+    return candidates, fixtures
 
 
 def select_daily_picks(candidates: List[Dict[str, Any]], fixtures: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -767,13 +736,11 @@ def select_daily_picks(candidates: List[Dict[str, Any]], fixtures: List[Dict[str
             break
         add_item(item)
 
-    # emergencia: si faltan picks, construirlos desde fixtures
     if len(selected) < 5:
         for event in fixtures:
             if len(selected) >= 5:
                 break
-            emergency_pick = build_emergency_pick(event)
-            add_item(emergency_pick)
+            add_item(build_emergency_pick(event))
 
     return selected[:5]
 
@@ -822,8 +789,8 @@ def determine_pick_result(pick: Dict[str, Any], score_event: Dict[str, Any]) -> 
 
 def settle_history() -> Dict[str, Any]:
     history = load_history()
-
     scores_index: Dict[str, Dict[str, Any]] = {}
+
     for sport_key in TARGET_SPORTS.keys():
         for event in fetch_scores_for_sport(sport_key, days_from=3):
             event_id = event.get("id")
@@ -891,7 +858,6 @@ def persist_today_in_history(data: Dict[str, Any]) -> None:
 
 def build_history_response() -> Dict[str, Any]:
     history = settle_history()
-
     days = list(history.get("days", {}).values())
     days.sort(key=lambda x: x.get("date", ""), reverse=True)
 
@@ -915,8 +881,7 @@ def build_history_response() -> Dict[str, Any]:
 
 
 def generate_daily_picks() -> Dict[str, Any]:
-    fixtures = get_nearby_fixtures()
-    candidates = get_candidates()
+    candidates, fixtures = get_candidates_and_fixtures()
     picks = select_daily_picks(candidates, fixtures)
 
     now = madrid_now()
@@ -939,7 +904,7 @@ def generate_daily_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v21"}
+    return {"status": "ok", "service": "top-picks-backend-v22"}
 
 
 @app.get("/health")
@@ -950,8 +915,7 @@ def health():
 @app.get("/debug-top-picks")
 def debug_top_picks():
     try:
-        fixtures = get_nearby_fixtures()
-        candidates = get_candidates()
+        candidates, fixtures = get_candidates_and_fixtures()
         picks = select_daily_picks(candidates, fixtures)
         return {
             "fixtures_nearby_found": len(fixtures),
@@ -973,6 +937,9 @@ def history_picks():
 
 @app.get("/top-picks-today")
 def top_picks_today(refresh: int = Query(default=0)):
+    if refresh == 1:
+        clear_cache()
+
     cached = load_cache()
     if cached:
         return cached
