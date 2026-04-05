@@ -15,7 +15,7 @@ TZ_NAME = os.getenv("TZ", "Europe/Madrid")
 if not ODDS_API_KEY:
     raise RuntimeError("Falta ODDS_API_KEY en variables de entorno")
 
-app = FastAPI(title="Top Picks Backend", version="12.1.0")
+app = FastAPI(title="Top Picks Backend", version="13.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,6 +26,7 @@ app.add_middleware(
 )
 
 CACHE_FILE = "daily_cache.json"
+HISTORY_FILE = "history_picks.json"
 
 TARGET_SPORTS = {
     "soccer_spain_la_liga": {"title": "LaLiga", "priority": 84},
@@ -169,6 +170,27 @@ def clear_cache() -> None:
         pass
 
 
+def load_history() -> Dict[str, Any]:
+    if not os.path.exists(HISTORY_FILE):
+        return {"days": {}}
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "days" not in data or not isinstance(data["days"], dict):
+            return {"days": {}}
+        return data
+    except Exception:
+        return {"days": {}}
+
+
+def save_history(data: Dict[str, Any]) -> None:
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
 def fetch_events_for_sport(sport_key: str) -> List[Dict[str, Any]]:
     aliases = SPORT_KEY_ALIASES.get(sport_key, [sport_key])
 
@@ -187,6 +209,27 @@ def fetch_events_for_sport(sport_key: str) -> List[Dict[str, Any]]:
                 return data
         except Exception as e:
             log("Error sport", alias, str(e))
+            continue
+
+    return []
+
+
+def fetch_scores_for_sport(sport_key: str, days_from: int = 3) -> List[Dict[str, Any]]:
+    aliases = SPORT_KEY_ALIASES.get(sport_key, [sport_key])
+
+    for alias in aliases:
+        try:
+            data = odds_api_get(
+                f"/v4/sports/{alias}/scores",
+                {
+                    "daysFrom": days_from,
+                    "dateFormat": "iso",
+                },
+            )
+            if isinstance(data, list):
+                return data
+        except Exception as e:
+            log("Error scores", alias, str(e))
             continue
 
     return []
@@ -217,11 +260,8 @@ def get_today_fixtures() -> List[Dict[str, Any]]:
             except Exception:
                 continue
 
-            # Solo partidos del día de hoy
             if dt.strftime("%Y-%m-%d") != today_str:
                 continue
-
-            # Solo prepartido, nunca en juego
             if dt <= now:
                 continue
 
@@ -230,10 +270,7 @@ def get_today_fixtures() -> List[Dict[str, Any]]:
             seen.add(event_id)
 
     events.sort(
-        key=lambda x: (
-            -x.get("_priority", 10),
-            x.get("commence_time", "")
-        )
+        key=lambda x: (-x.get("_priority", 10), x.get("commence_time", ""))
     )
 
     log("Fixtures de hoy encontrados:", len(events))
@@ -275,7 +312,6 @@ def get_best_totals_market(event: Dict[str, Any], target_point: float = 2.5) -> 
 
             over = None
             under = None
-
             for outcome in market.get("outcomes", []):
                 point = safe_float(outcome.get("point"))
                 if point != target_point:
@@ -364,7 +400,7 @@ def build_market_consensus(event: Dict[str, Any]) -> Dict[str, float]:
     }
 
 
-def build_reasons(consensus: Dict[str, float], side: str) -> List[str]:
+def build_reasons(side: str) -> List[str]:
     if side == "home":
         return ["mejor consenso de mercado", "ventaja prepartido", "partido favorable"][:3]
     if side == "away":
@@ -397,22 +433,15 @@ def valid_band(odds: float) -> bool:
     return 1.75 <= odds <= 4.50
 
 
-def build_tipster_explanation(label: str, reasons: List[str], model_prob: float, implied_prob_: float, odds: float, source_type: str) -> str:
+def build_tipster_explanation(label: str, reasons: List[str], model_prob: float, implied_prob_: float, odds: float) -> str:
     edge = round((model_prob - implied_prob_) * 100, 1)
     joined = ", ".join(reasons[:3])
 
-    if source_type == "real_odds":
-        return (
-            f"{label} entra por {joined}. "
-            f"Cuota {round(odds, 2)} con probabilidad implícita del {round(implied_prob_ * 100, 1)}%, "
-            f"frente a una estimación del modelo del {round(model_prob * 100, 1)}%. "
-            f"Value estimado: {edge:+.1f}%."
-        )
-
     return (
         f"{label} entra por {joined}. "
-        f"No había cuota utilizable dentro del rango objetivo, así que se usa la estimación del modelo. "
-        f"Probabilidad estimada: {round(model_prob * 100, 1)}%."
+        f"Cuota {round(odds, 2)} con probabilidad implícita del {round(implied_prob_ * 100, 1)}%, "
+        f"frente a una estimación del modelo del {round(model_prob * 100, 1)}%. "
+        f"Value estimado: {edge:+.1f}%."
     )
 
 
@@ -432,7 +461,6 @@ def build_candidate(
     market_name: str,
     explanation: str,
     score: float,
-    source_type: str,
 ) -> Dict[str, Any]:
     return {
         "fixture_id": event.get("id"),
@@ -452,9 +480,11 @@ def build_candidate(
         "type": pick_type,
         "bookmaker": bookmaker,
         "market_name": market_name,
-        "source_type": source_type,
+        "source_type": "real_odds",
         "tipster_explanation": explanation,
         "score": round(score, 6),
+        "status": "pending",
+        "result_label": "Pendiente",
     }
 
 
@@ -499,9 +529,8 @@ def get_candidates() -> List[Dict[str, Any]]:
                         f"Gana {home_name}", "winner",
                         home_odds, p, imp, confidence_from_edge(edge, p), pick_type,
                         h2h_market["bookmaker"], "h2h",
-                        build_tipster_explanation(f"Gana {home_name}", build_reasons(consensus, "home"), p, imp, home_odds, "real_odds"),
+                        build_tipster_explanation(f"Gana {home_name}", build_reasons("home"), p, imp, home_odds),
                         score_pick(edge, p, pick_type),
-                        "real_odds",
                     )
                 )
 
@@ -516,9 +545,8 @@ def get_candidates() -> List[Dict[str, Any]]:
                         f"Gana {away_name}", "winner",
                         away_odds, p, imp, confidence_from_edge(edge, p), pick_type,
                         h2h_market["bookmaker"], "h2h",
-                        build_tipster_explanation(f"Gana {away_name}", build_reasons(consensus, "away"), p, imp, away_odds, "real_odds"),
+                        build_tipster_explanation(f"Gana {away_name}", build_reasons("away"), p, imp, away_odds),
                         score_pick(edge, p, pick_type),
-                        "real_odds",
                     )
                 )
 
@@ -536,9 +564,8 @@ def get_candidates() -> List[Dict[str, Any]]:
                         "Más de 2.5 goles", "over_2_5",
                         over_odds, p, imp, confidence_from_edge(edge, p), pick_type,
                         totals_market["bookmaker"], "totals_2.5",
-                        build_tipster_explanation("Más de 2.5 goles", build_reasons(consensus, "over25"), p, imp, over_odds, "real_odds"),
+                        build_tipster_explanation("Más de 2.5 goles", build_reasons("over25"), p, imp, over_odds),
                         score_pick(edge, p, pick_type),
-                        "real_odds",
                     )
                 )
 
@@ -591,6 +618,145 @@ def select_daily_picks(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return selected[:5]
 
 
+def determine_pick_result(pick: Dict[str, Any], score_event: Dict[str, Any]) -> Dict[str, str]:
+    scores = score_event.get("scores") or []
+    if not score_event.get("completed") or len(scores) < 2:
+        return {"status": "pending", "result_label": "Pendiente"}
+
+    score_map = {}
+    for item in scores:
+        try:
+            score_map[item.get("name")] = int(item.get("score"))
+        except Exception:
+            return {"status": "pending", "result_label": "Pendiente"}
+
+    home = score_event.get("home_team")
+    away = score_event.get("away_team")
+    if home not in score_map or away not in score_map:
+        return {"status": "pending", "result_label": "Pendiente"}
+
+    home_goals = score_map[home]
+    away_goals = score_map[away]
+    total_goals = home_goals + away_goals
+
+    market_group = pick.get("market_group")
+    pick_text = str(pick.get("pick", ""))
+
+    won = False
+
+    if market_group == "winner":
+        if pick_text == f"Gana {home}" and home_goals > away_goals:
+            won = True
+        elif pick_text == f"Gana {away}" and away_goals > home_goals:
+            won = True
+
+    elif market_group == "over_2_5":
+        won = total_goals > 2.5
+
+    elif market_group == "btts_yes":
+        won = home_goals > 0 and away_goals > 0
+
+    return {
+        "status": "won" if won else "lost",
+        "result_label": "Acertada" if won else "Perdida",
+    }
+
+
+def settle_history() -> Dict[str, Any]:
+    history = load_history()
+
+    scores_index: Dict[str, Dict[str, Any]] = {}
+    for sport_key in TARGET_SPORTS.keys():
+        for event in fetch_scores_for_sport(sport_key, days_from=3):
+            event_id = event.get("id")
+            if event_id:
+                scores_index[event_id] = event
+
+    changed = False
+
+    for day_key, day_data in history.get("days", {}).items():
+        picks = day_data.get("picks", [])
+        for pick in picks:
+            if pick.get("status") in {"won", "lost"}:
+                continue
+
+            event_id = pick.get("fixture_id")
+            score_event = scores_index.get(event_id)
+            if not score_event:
+                continue
+
+            result = determine_pick_result(pick, score_event)
+            if result["status"] != pick.get("status"):
+                pick["status"] = result["status"]
+                pick["result_label"] = result["result_label"]
+                changed = True
+
+        won = sum(1 for p in picks if p.get("status") == "won")
+        lost = sum(1 for p in picks if p.get("status") == "lost")
+        pending = sum(1 for p in picks if p.get("status") == "pending")
+
+        day_data["stats"] = {
+            "won": won,
+            "lost": lost,
+            "pending": pending,
+            "total": len(picks),
+        }
+
+    if changed:
+        save_history(history)
+
+    return history
+
+
+def persist_today_in_history(data: Dict[str, Any]) -> None:
+    history = load_history()
+    day_key = data["date"]
+
+    won = sum(1 for p in data["picks"] if p.get("status") == "won")
+    lost = sum(1 for p in data["picks"] if p.get("status") == "lost")
+    pending = sum(1 for p in data["picks"] if p.get("status") == "pending")
+
+    history["days"][day_key] = {
+        "date": data["date"],
+        "generated_at": data["generated_at"],
+        "count": data["count"],
+        "stats": {
+            "won": won,
+            "lost": lost,
+            "pending": pending,
+            "total": data["count"],
+        },
+        "picks": data["picks"],
+    }
+    save_history(history)
+
+
+def build_history_response() -> Dict[str, Any]:
+    history = settle_history()
+
+    days = list(history.get("days", {}).values())
+    days.sort(key=lambda x: x.get("date", ""), reverse=True)
+
+    total_won = sum(day.get("stats", {}).get("won", 0) for day in days)
+    total_lost = sum(day.get("stats", {}).get("lost", 0) for day in days)
+    total_pending = sum(day.get("stats", {}).get("pending", 0) for day in days)
+    total_picks = sum(day.get("stats", {}).get("total", 0) for day in days)
+    settled = total_won + total_lost
+
+    hit_rate = round((total_won / settled) * 100, 1) if settled > 0 else 0.0
+
+    return {
+        "summary": {
+            "total_picks": total_picks,
+            "won": total_won,
+            "lost": total_lost,
+            "pending": total_pending,
+            "hit_rate": hit_rate,
+        },
+        "days": days[:30],
+    }
+
+
 def generate_daily_picks() -> Dict[str, Any]:
     candidates = get_candidates()
     picks = select_daily_picks(candidates)
@@ -609,12 +775,13 @@ def generate_daily_picks() -> Dict[str, Any]:
     }
 
     save_cache(data)
+    persist_today_in_history(data)
     return data
 
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v12.1"}
+    return {"status": "ok", "service": "top-picks-backend-v13"}
 
 
 @app.get("/health")
@@ -636,6 +803,14 @@ def debug_top_picks():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Debug error: {str(e)}")
+
+
+@app.get("/history-picks")
+def history_picks():
+    try:
+        return build_history_response()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"History error: {str(e)}")
 
 
 @app.get("/top-picks-today")
