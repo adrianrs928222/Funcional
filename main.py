@@ -17,7 +17,7 @@ if not API_KEY:
 
 HEADERS = {"x-apisports-key": API_KEY}
 
-app = FastAPI(title="Top Picks Backend", version="8.2.0")
+app = FastAPI(title="Top Picks Backend", version="8.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -157,28 +157,38 @@ def clear_cache() -> None:
         pass
 
 
-def get_upcoming_fixtures(days_ahead: int = 7) -> List[Dict[str, Any]]:
+def get_upcoming_fixtures() -> List[Dict[str, Any]]:
     fixtures: List[Dict[str, Any]] = []
     now = madrid_now()
-    today_str = now.strftime("%Y-%m-%d")
 
-    for i in range(days_ahead):
-        target_date = (now + timedelta(days=i)).strftime("%Y-%m-%d")
+    season = now.year
+    if now.month < 7:
+        # muchas ligas europeas siguen perteneciendo a la temporada anterior
+        season = now.year - 1
+
+    seen_fixture_ids = set()
+
+    for league_id in TARGET_LEAGUES:
         try:
-            payload = api_get("/fixtures", {"date": target_date})
+            payload = api_get("/fixtures", {
+                "league": league_id,
+                "season": season,
+                "next": 10
+            })
         except Exception as e:
-            log("Error consultando fixtures para", target_date, str(e))
+            log("Error league", league_id, str(e))
             continue
 
         for item in payload.get("response", []):
-            league_id = item.get("league", {}).get("id")
-            status_short = item.get("fixture", {}).get("status", {}).get("short")
-            fixture_date_str = item.get("fixture", {}).get("date")
+            fixture = item.get("fixture", {})
+            status_short = fixture.get("status", {}).get("short")
+            fixture_id = fixture.get("id")
+            fixture_date_str = fixture.get("date")
 
-            if league_id not in TARGET_LEAGUES:
+            if not fixture_id or fixture_id in seen_fixture_ids:
                 continue
 
-            # Solo prepartido
+            # solo prepartido
             if status_short not in {"NS", "TBD"}:
                 continue
 
@@ -189,14 +199,12 @@ def get_upcoming_fixtures(days_ahead: int = 7) -> List[Dict[str, Any]]:
             except Exception:
                 continue
 
-            fixture_day_str = fixture_dt.strftime("%Y-%m-%d")
-
-            # Permitir partidos de hoy aunque ya hayan pasado unas horas del día,
-            # pero sin incluir partidos live porque ya filtramos por NS/TBD.
-            if fixture_day_str != today_str and fixture_dt <= now:
+            # deja pasar partidos de hoy y próximos, pero evita basura muy pasada
+            if fixture_dt < now - timedelta(hours=6):
                 continue
 
             fixtures.append(item)
+            seen_fixture_ids.add(fixture_id)
 
     fixtures.sort(
         key=lambda x: (
@@ -205,7 +213,7 @@ def get_upcoming_fixtures(days_ahead: int = 7) -> List[Dict[str, Any]]:
         )
     )
 
-    log("Fixtures próximos encontrados:", len(fixtures))
+    log("Fixtures encontrados (modo ligas):", len(fixtures))
     return fixtures
 
 
@@ -901,7 +909,7 @@ def generate_real_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v8.2"}
+    return {"status": "ok", "service": "top-picks-backend-v8.3"}
 
 
 @app.get("/health")
