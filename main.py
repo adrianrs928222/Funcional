@@ -17,7 +17,7 @@ if not API_KEY:
 
 HEADERS = {"x-apisports-key": API_KEY}
 
-app = FastAPI(title="Top Picks Backend", version="8.3.0")
+app = FastAPI(title="Top Picks Backend", version="9.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,28 +30,10 @@ app.add_middleware(
 CACHE_FILE = "daily_cache.json"
 
 TARGET_LEAGUES = {
-    # Top
-    140,  # LaLiga
-    39,   # Premier
-    135,  # Serie A
-    78,   # Bundesliga
-    61,   # Ligue 1
-
-    # Segundas
-    141,  # LaLiga 2
-    40,   # Championship
-    136,  # Serie B
-    79,   # Bundesliga 2
-    62,   # Ligue 2
-
-    # Europa
-    2,    # Champions
-    3,    # Europa League
-    848,  # Conference League
-
-    # Internacional
-    1,    # World Cup
-    4,    # Euro
+    140, 39, 135, 78, 61,      # top
+    141, 40, 136, 79, 62,      # second divisions
+    2, 3, 848,                 # Europe
+    1, 4                       # World Cup / Euro
 }
 
 
@@ -163,7 +145,6 @@ def get_upcoming_fixtures() -> List[Dict[str, Any]]:
 
     season = now.year
     if now.month < 7:
-        # muchas ligas europeas siguen perteneciendo a la temporada anterior
         season = now.year - 1
 
     seen_fixture_ids = set()
@@ -173,7 +154,7 @@ def get_upcoming_fixtures() -> List[Dict[str, Any]]:
             payload = api_get("/fixtures", {
                 "league": league_id,
                 "season": season,
-                "next": 10
+                "next": 12,
             })
         except Exception as e:
             log("Error league", league_id, str(e))
@@ -187,8 +168,6 @@ def get_upcoming_fixtures() -> List[Dict[str, Any]]:
 
             if not fixture_id or fixture_id in seen_fixture_ids:
                 continue
-
-            # solo prepartido
             if status_short not in {"NS", "TBD"}:
                 continue
 
@@ -199,7 +178,6 @@ def get_upcoming_fixtures() -> List[Dict[str, Any]]:
             except Exception:
                 continue
 
-            # deja pasar partidos de hoy y próximos, pero evita basura muy pasada
             if fixture_dt < now - timedelta(hours=6):
                 continue
 
@@ -213,7 +191,7 @@ def get_upcoming_fixtures() -> List[Dict[str, Any]]:
         )
     )
 
-    log("Fixtures encontrados (modo ligas):", len(fixtures))
+    log("Fixtures encontrados:", len(fixtures))
     return fixtures
 
 
@@ -336,9 +314,8 @@ def extract_markets_from_odds_item(odds_item: Dict[str, Any]) -> List[Dict[str, 
 
     for bookmaker in sorted_bookmakers:
         bookmaker_name = str(bookmaker.get("name", "Bookmaker"))
-        bets = bookmaker.get("bets", [])
 
-        for bet in bets:
+        for bet in bookmaker.get("bets", []):
             raw_market_name = str(bet.get("name", ""))
             market_type = market_type_from_name(raw_market_name)
             if not market_type:
@@ -353,45 +330,42 @@ def extract_markets_from_odds_item(odds_item: Dict[str, Any]) -> List[Dict[str, 
                     continue
                 values_map[label] = odd
 
-            if market_type == "winner":
-                if "home" in values_map and "away" in values_map:
-                    found.append({
-                        "market_type": "winner",
-                        "bookmaker": bookmaker_name,
-                        "market_name": raw_market_name,
-                        "values": {
-                            "home": values_map["home"],
-                            "away": values_map["away"],
-                            "draw": values_map.get("draw"),
-                        },
-                        "bookmaker_rank": bookmaker_rank(bookmaker_name),
-                    })
+            if market_type == "winner" and "home" in values_map and "away" in values_map:
+                found.append({
+                    "market_type": "winner",
+                    "bookmaker": bookmaker_name,
+                    "market_name": raw_market_name,
+                    "values": {
+                        "home": values_map["home"],
+                        "away": values_map["away"],
+                        "draw": values_map.get("draw"),
+                    },
+                    "bookmaker_rank": bookmaker_rank(bookmaker_name),
+                })
 
-            elif market_type == "over_2_5":
-                if "over_2_5" in values_map:
-                    found.append({
-                        "market_type": "over_2_5",
-                        "bookmaker": bookmaker_name,
-                        "market_name": raw_market_name,
-                        "values": {
-                            "over_2_5": values_map["over_2_5"],
-                            "under_2_5": values_map.get("under_2_5"),
-                        },
-                        "bookmaker_rank": bookmaker_rank(bookmaker_name),
-                    })
+            elif market_type == "over_2_5" and "over_2_5" in values_map:
+                found.append({
+                    "market_type": "over_2_5",
+                    "bookmaker": bookmaker_name,
+                    "market_name": raw_market_name,
+                    "values": {
+                        "over_2_5": values_map["over_2_5"],
+                        "under_2_5": values_map.get("under_2_5"),
+                    },
+                    "bookmaker_rank": bookmaker_rank(bookmaker_name),
+                })
 
-            elif market_type == "btts_yes":
-                if "yes" in values_map:
-                    found.append({
-                        "market_type": "btts_yes",
-                        "bookmaker": bookmaker_name,
-                        "market_name": raw_market_name,
-                        "values": {
-                            "yes": values_map["yes"],
-                            "no": values_map.get("no"),
-                        },
-                        "bookmaker_rank": bookmaker_rank(bookmaker_name),
-                    })
+            elif market_type == "btts_yes" and "yes" in values_map:
+                found.append({
+                    "market_type": "btts_yes",
+                    "bookmaker": bookmaker_name,
+                    "market_name": raw_market_name,
+                    "values": {
+                        "yes": values_map["yes"],
+                        "no": values_map.get("no"),
+                    },
+                    "bookmaker_rank": bookmaker_rank(bookmaker_name),
+                })
 
     found.sort(key=lambda x: x["bookmaker_rank"])
     return found
@@ -679,7 +653,8 @@ def build_candidate(
     bookmaker: str,
     market_name: str,
     explanation: str,
-    score: float
+    score: float,
+    source_type: str,
 ) -> Dict[str, Any]:
     return {
         "fixture_id": fixture_id,
@@ -699,9 +674,86 @@ def build_candidate(
         "type": pick_type,
         "bookmaker": bookmaker,
         "market_name": market_name,
+        "source_type": source_type,
         "tipster_explanation": explanation,
         "score": round(score, 6),
     }
+
+
+def build_model_fallback_candidate(
+    fixture_id: int,
+    competition: str,
+    country: str,
+    league_id: int,
+    match: str,
+    starts_at: str,
+    model: Dict[str, Any],
+    home_name: str,
+    away_name: str,
+) -> Dict[str, Any]:
+    options = [
+        {
+            "pick": f"Gana {home_name}",
+            "market_group": "winner",
+            "prob": model["p_home"],
+            "reasons": model["home_reasons"],
+        },
+        {
+            "pick": f"Gana {away_name}",
+            "market_group": "winner",
+            "prob": model["p_away"],
+            "reasons": model["away_reasons"],
+        },
+        {
+            "pick": "Más de 2.5 goles",
+            "market_group": "over_2_5",
+            "prob": model["p_over25"],
+            "reasons": model["over_reasons"],
+        },
+        {
+            "pick": "Ambos marcan: Sí",
+            "market_group": "btts_yes",
+            "prob": model["p_btts_yes"],
+            "reasons": model["btts_reasons"],
+        },
+    ]
+
+    best = max(options, key=lambda x: x["prob"])
+    model_prob = best["prob"]
+
+    # odds estimadas prudentes, no absurdas
+    estimated_odds = clamp(round(1.0 / max(model_prob, 0.18), 2), 1.45, 4.50)
+    implied_prob = implied_probability(estimated_odds)
+    edge = model_prob - implied_prob
+    pick_type = classify_pick_type(estimated_odds)
+    confidence = confidence_from_edge(edge, model_prob)
+
+    explanation = (
+        f"{best['pick']} entra por {', '.join(best['reasons'])}. "
+        f"No había odds utilizables en la API para este fixture, así que se usa el modelo interno. "
+        f"Probabilidad estimada del modelo: {round(model_prob * 100, 1)}%."
+    )
+
+    return build_candidate(
+        fixture_id=fixture_id,
+        competition=competition,
+        country=country,
+        league_id=league_id,
+        match=match,
+        starts_at=starts_at,
+        pick=best["pick"],
+        market_group=best["market_group"],
+        odds=estimated_odds,
+        model_prob=model_prob,
+        implied_prob=implied_prob,
+        confidence=confidence,
+        pick_type=pick_type,
+        bookmaker="MODEL",
+        market_name="IA Fallback",
+        explanation=explanation,
+        score=score_pick(edge, model_prob, pick_type),
+        source_type="model_fallback",
+    )
 
 
 def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
@@ -710,6 +762,7 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
     fallback_candidates: List[Dict[str, Any]] = []
 
     fixtures_with_markets = 0
+    fixtures_with_fallback = 0
 
     for item in fixtures:
         fixture = item.get("fixture", {})
@@ -728,16 +781,30 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
 
         log("Fixture:", fixture_id, match, "| markets:", len(markets))
 
-        if not markets:
-            continue
-
-        fixtures_with_markets += 1
-
         model = build_match_model(item, prediction)
         starts_at = iso_to_local_hhmm(fixture["date"])
         competition = league.get("name")
         country = league.get("country")
         league_id = league.get("id", 0)
+
+        if not markets:
+            fixtures_with_fallback += 1
+            candidate = build_model_fallback_candidate(
+                fixture_id=fixture_id,
+                competition=competition,
+                country=country,
+                league_id=league_id,
+                match=match,
+                starts_at=starts_at,
+                model=model,
+                home_name=home_name,
+                away_name=away_name,
+            )
+            fallback_candidates.append(candidate)
+            strong_candidates.append(candidate)
+            continue
+
+        fixtures_with_markets += 1
 
         for market in markets:
             bookmaker = market["bookmaker"]
@@ -759,7 +826,8 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
                         f"Gana {home_name}", "winner",
                         home_odds, p, imp, conf, pick_type, bookmaker, market_name,
                         build_tipster_explanation(f"Gana {home_name}", model["home_reasons"], p, imp, home_odds),
-                        score_pick(edge, p, pick_type)
+                        score_pick(edge, p, pick_type),
+                        "real_odds",
                     )
                     fallback_candidates.append(candidate)
                     if valid_by_type(pick_type, edge, p):
@@ -776,7 +844,8 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
                         f"Gana {away_name}", "winner",
                         away_odds, p, imp, conf, pick_type, bookmaker, market_name,
                         build_tipster_explanation(f"Gana {away_name}", model["away_reasons"], p, imp, away_odds),
-                        score_pick(edge, p, pick_type)
+                        score_pick(edge, p, pick_type),
+                        "real_odds",
                     )
                     fallback_candidates.append(candidate)
                     if valid_by_type(pick_type, edge, p):
@@ -795,7 +864,8 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
                         "Más de 2.5 goles", "over_2_5",
                         over_odds, p, imp, conf, pick_type, bookmaker, market_name,
                         build_tipster_explanation("Más de 2.5 goles", model["over_reasons"], p, imp, over_odds),
-                        score_pick(edge, p, pick_type)
+                        score_pick(edge, p, pick_type),
+                        "real_odds",
                     )
                     fallback_candidates.append(candidate)
                     if valid_by_type(pick_type, edge, p):
@@ -814,7 +884,8 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
                         "Ambos marcan: Sí", "btts_yes",
                         yes_odds, p, imp, conf, pick_type, bookmaker, market_name,
                         build_tipster_explanation("Ambos marcan: Sí", model["btts_reasons"], p, imp, yes_odds),
-                        score_pick(edge, p, pick_type)
+                        score_pick(edge, p, pick_type),
+                        "real_odds",
                     )
                     fallback_candidates.append(candidate)
                     if valid_by_type(pick_type, edge, p):
@@ -841,6 +912,7 @@ def get_candidates() -> Dict[str, List[Dict[str, Any]]]:
     )
 
     log("Fixtures con markets:", fixtures_with_markets)
+    log("Fixtures con fallback modelo:", fixtures_with_fallback)
     log("Strong candidates:", len(strong_candidates))
     log("Fallback candidates:", len(fallback_candidates))
 
@@ -909,7 +981,7 @@ def generate_real_picks() -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"status": "ok", "service": "top-picks-backend-v8.3"}
+    return {"status": "ok", "service": "top-picks-backend-v9"}
 
 
 @app.get("/health")
@@ -924,6 +996,7 @@ def debug_top_picks():
         summary = {
             "fixtures_found": len(fixtures),
             "fixtures_with_markets": 0,
+            "fixtures_with_model_fallback": 0,
             "strong_candidates": 0,
             "fallback_candidates": 0,
             "fixture_samples": [],
@@ -952,7 +1025,24 @@ def debug_top_picks():
                 "markets_found": len(markets),
             })
 
+            prediction = get_prediction(fixture_id)
+            model = build_match_model(item, prediction)
+
             if not markets:
+                summary["fixtures_with_model_fallback"] += 1
+                fallback = build_model_fallback_candidate(
+                    fixture_id=fixture_id,
+                    competition=league.get("name"),
+                    country=league.get("country"),
+                    league_id=league.get("id", 0),
+                    match=match,
+                    starts_at=iso_to_local_hhmm(fixture["date"]),
+                    model=model,
+                    home_name=teams["home"]["name"],
+                    away_name=teams["away"]["name"],
+                )
+                fallback_candidates.append(fallback)
+                strong_candidates.append(fallback)
                 continue
 
             summary["fixtures_with_markets"] += 1
@@ -966,84 +1056,6 @@ def debug_top_picks():
                     "bookmaker": market.get("bookmaker"),
                     "values": market.get("values"),
                 })
-
-            prediction = get_prediction(fixture_id)
-            model = build_match_model(item, prediction)
-
-            for market in markets:
-                market_type = market["market_type"]
-
-                if market_type == "winner":
-                    home_odds = market["values"].get("home")
-                    away_odds = market["values"].get("away")
-
-                    if home_odds and 1.45 <= home_odds <= 8.00:
-                        p = model["p_home"]
-                        imp = implied_probability(home_odds)
-                        edge = p - imp
-                        pick_type = classify_pick_type(home_odds)
-                        fallback_candidates.append({
-                            "match": match,
-                            "pick": f'Gana {teams["home"]["name"]}',
-                            "odds": home_odds,
-                            "edge": round(edge * 100, 2),
-                            "model_prob": round(p * 100, 2),
-                            "market_type": market_type,
-                        })
-                        if valid_by_type(pick_type, edge, p):
-                            strong_candidates.append(fallback_candidates[-1])
-
-                    if away_odds and 1.45 <= away_odds <= 8.00:
-                        p = model["p_away"]
-                        imp = implied_probability(away_odds)
-                        edge = p - imp
-                        pick_type = classify_pick_type(away_odds)
-                        fallback_candidates.append({
-                            "match": match,
-                            "pick": f'Gana {teams["away"]["name"]}',
-                            "odds": away_odds,
-                            "edge": round(edge * 100, 2),
-                            "model_prob": round(p * 100, 2),
-                            "market_type": market_type,
-                        })
-                        if valid_by_type(pick_type, edge, p):
-                            strong_candidates.append(fallback_candidates[-1])
-
-                elif market_type == "over_2_5":
-                    over_odds = market["values"].get("over_2_5")
-                    if over_odds and 1.45 <= over_odds <= 8.00:
-                        p = model["p_over25"]
-                        imp = implied_probability(over_odds)
-                        edge = p - imp
-                        pick_type = classify_pick_type(over_odds)
-                        fallback_candidates.append({
-                            "match": match,
-                            "pick": "Más de 2.5 goles",
-                            "odds": over_odds,
-                            "edge": round(edge * 100, 2),
-                            "model_prob": round(p * 100, 2),
-                            "market_type": market_type,
-                        })
-                        if valid_by_type(pick_type, edge, p):
-                            strong_candidates.append(fallback_candidates[-1])
-
-                elif market_type == "btts_yes":
-                    yes_odds = market["values"].get("yes")
-                    if yes_odds and 1.45 <= yes_odds <= 8.00:
-                        p = model["p_btts_yes"]
-                        imp = implied_probability(yes_odds)
-                        edge = p - imp
-                        pick_type = classify_pick_type(yes_odds)
-                        fallback_candidates.append({
-                            "match": match,
-                            "pick": "Ambos marcan: Sí",
-                            "odds": yes_odds,
-                            "edge": round(edge * 100, 2),
-                            "model_prob": round(p * 100, 2),
-                            "market_type": market_type,
-                        })
-                        if valid_by_type(pick_type, edge, p):
-                            strong_candidates.append(fallback_candidates[-1])
 
         summary["strong_candidates"] = len(strong_candidates)
         summary["fallback_candidates"] = len(fallback_candidates)
