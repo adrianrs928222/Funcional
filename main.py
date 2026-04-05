@@ -22,66 +22,56 @@ if not API_KEY:
 CACHE_FILE = "cache.json"
 HISTORY_FILE = "history.json"
 
-LOOKAHEAD_HOURS = 48
+LOOKAHEAD_HOURS = 36
 CACHE_REFRESH_HOURS = 6
 MAX_PICKS = 12
 MAX_HISTORY_DAYS = 10
 SCORE_REFRESH_DAYS_BACK = 3
+MAX_MATCHES_PER_COMP = 8
 
 COMPETITIONS: Dict[str, Dict[str, Any]] = {
     "CL": {"name": "Champions League", "priority": 100},
-    "EL": {"name": "Europa League", "priority": 97},
-    "ELC": {"name": "Conference League", "priority": 95},
-    "WC": {"name": "Mundial", "priority": 98},
-    "EC": {"name": "Eurocopa", "priority": 96},
-    "PD": {"name": "LaLiga", "priority": 90},
-    "SD": {"name": "LaLiga Hypermotion", "priority": 82},
-    "PL": {"name": "Premier League", "priority": 89},
-    "SA": {"name": "Serie A", "priority": 88},
-    "BL1": {"name": "Bundesliga", "priority": 87},
-    "DED": {"name": "Eredivisie", "priority": 86},
-    "FL1": {"name": "Ligue 1", "priority": 85},
-    "PPL": {"name": "Primeira Liga", "priority": 84},
+    "PD": {"name": "LaLiga", "priority": 92},
+    "SD": {"name": "LaLiga Hypermotion", "priority": 84},
+    "PL": {"name": "Premier League", "priority": 91},
+    "WC": {"name": "Mundial", "priority": 96},
 }
 
 TEAM_RATINGS: Dict[str, float] = {
+    # España
     "Real Madrid CF": 93,
     "FC Barcelona": 91,
     "Club Atlético de Madrid": 87,
-    "Athletic Club": 83,
+    "Athletic Club": 84,
     "Villarreal CF": 81,
     "Real Betis Balompié": 80,
     "Valencia CF": 77,
     "Sevilla FC": 78,
-    "Girona FC": 79,
-    "Arsenal FC": 90,
+    "Girona FC": 81,
+    "Real Sociedad de Fútbol": 82,
+
+    # Inglaterra
     "Manchester City FC": 94,
+    "Arsenal FC": 91,
     "Liverpool FC": 91,
     "Chelsea FC": 84,
     "Tottenham Hotspur FC": 84,
     "Newcastle United FC": 82,
-    "Aston Villa FC": 82,
-    "Manchester United FC": 81,
+    "Manchester United FC": 82,
+    "Aston Villa FC": 83,
+
+    # Europa
+    "FC Bayern München": 92,
+    "Borussia Dortmund": 86,
+    "Paris Saint-Germain FC": 91,
     "FC Internazionale Milano": 90,
     "Juventus FC": 86,
     "AC Milan": 86,
     "SSC Napoli": 84,
-    "AS Roma": 82,
-    "Atalanta BC": 83,
-    "FC Bayern München": 92,
-    "Bayer 04 Leverkusen": 89,
-    "Borussia Dortmund": 86,
-    "RB Leipzig": 84,
-    "VfB Stuttgart": 81,
-    "Paris Saint-Germain FC": 91,
-    "Olympique de Marseille": 81,
-    "AS Monaco FC": 82,
-    "LOSC Lille": 80,
     "SL Benfica": 84,
-    "Sporting CP": 84,
     "FC Porto": 83,
-    "AFC Ajax": 80,
     "PSV": 85,
+    "AFC Ajax": 80,
     "Feyenoord Rotterdam": 84,
 }
 
@@ -136,6 +126,12 @@ def competition_priority(league_name: str) -> int:
             return int(meta["priority"])
     return 0
 
+def safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
 def cache_is_valid(cache: Dict[str, Any]) -> bool:
     if not cache:
         return False
@@ -162,19 +158,21 @@ def cache_is_valid(cache: Dict[str, Any]) -> bool:
 
 def api_get(path: str, params: Optional[Dict[str, Any]] = None) -> Any:
     headers = {"X-Auth-Token": API_KEY}
-    r = requests.get(f"{BASE_URL}{path}", headers=headers, params=params or {}, timeout=25)
-
+    r = requests.get(
+        f"{BASE_URL}{path}",
+        headers=headers,
+        params=params or {},
+        timeout=12,
+    )
     if not r.ok:
         raise requests.HTTPError(f"{r.status_code} {r.text[:500]}")
-
     return r.json()
 
 def stable_team_rating(team_name: str) -> float:
     if team_name in TEAM_RATINGS:
         return TEAM_RATINGS[team_name]
-
     h = abs(hash(team_name)) % 1000
-    return 68 + (h / 1000) * 16
+    return 67 + (h / 1000) * 17  # 67-84 aprox
 
 # =========================================================
 # ROOT / TEST
@@ -264,6 +262,7 @@ def get_real_events_window() -> List[Dict[str, Any]]:
     for code, meta in COMPETITIONS.items():
         try:
             matches = fetch_matches_for_competition(code, start, end)
+            matches = matches[:MAX_MATCHES_PER_COMP]
             print(f"{code} -> {len(matches)} partidos")
         except Exception as e:
             print(f"ERROR competición {code}: {e}")
@@ -289,6 +288,7 @@ def get_recent_events_for_scoring() -> Dict[int, Dict[str, Any]]:
     for code, meta in COMPETITIONS.items():
         try:
             matches = fetch_matches_for_competition(code, start, end)
+            matches = matches[:MAX_MATCHES_PER_COMP]
         except Exception:
             continue
 
@@ -301,7 +301,7 @@ def get_recent_events_for_scoring() -> Dict[int, Dict[str, Any]]:
     return event_map
 
 # =========================================================
-# MODELO DE PREDICCIÓN
+# MODELO INTELIGENTE
 # =========================================================
 
 def compute_strengths(home: str, away: str, league_priority: int) -> Tuple[float, float]:
@@ -309,7 +309,7 @@ def compute_strengths(home: str, away: str, league_priority: int) -> Tuple[float
     away_rating = stable_team_rating(away)
 
     league_bonus = (league_priority - 80) * 0.03 if league_priority >= 80 else 0.0
-    home_strength = home_rating + 3.2 + league_bonus
+    home_strength = home_rating + 3.1 + league_bonus
     away_strength = away_rating + league_bonus
 
     return home_strength, away_strength
@@ -317,11 +317,11 @@ def compute_strengths(home: str, away: str, league_priority: int) -> Tuple[float
 def expected_goals(home_strength: float, away_strength: float) -> Tuple[float, float]:
     diff = home_strength - away_strength
 
-    home_xg = 1.25 + (diff * 0.03)
-    away_xg = 1.05 - (diff * 0.02)
+    home_xg = 1.22 + (diff * 0.032)
+    away_xg = 1.03 - (diff * 0.021)
 
-    home_xg = max(0.55, min(home_xg, 2.8))
-    away_xg = max(0.40, min(away_xg, 2.4))
+    home_xg = max(0.55, min(home_xg, 2.85))
+    away_xg = max(0.38, min(away_xg, 2.35))
 
     return round(home_xg, 2), round(away_xg, 2)
 
@@ -330,7 +330,7 @@ def predict_winner(home: str, away: str, hs: float, aws: float) -> str:
 
 def predict_btts(home_xg: float, away_xg: float, hs: float, aws: float) -> str:
     diff = abs(hs - aws)
-    if home_xg >= 1.0 and away_xg >= 0.9 and diff < 8.0:
+    if home_xg >= 1.05 and away_xg >= 0.92 and diff < 7.5:
         return "Sí"
     return "No"
 
@@ -342,16 +342,8 @@ def predict_cards(league: str, hs: float, aws: float, home: str, away: str) -> D
         "LaLiga": 5,
         "LaLiga Hypermotion": 6,
         "Premier League": 4,
-        "Serie A": 5,
-        "Bundesliga": 4,
-        "Eredivisie": 4,
         "Champions League": 4,
-        "Europa League": 4,
-        "Conference League": 4,
         "Mundial": 4,
-        "Eurocopa": 4,
-        "Ligue 1": 4,
-        "Primeira Liga": 5,
     }
 
     total = base_cards.get(league, 4)
@@ -374,10 +366,10 @@ def estimate_market_confidence(pick_type: str, hs: float, aws: float, home_xg: f
     total_xg = home_xg + away_xg
 
     if pick_type == "winner":
-        conf = 68 + min(diff * 1.7, 20)
+        conf = 69 + min(diff * 1.75, 20)
     elif pick_type == "btts_yes":
         balance_bonus = max(0, 10 - diff)
-        conf = 66 + balance_bonus + max(0, (min(home_xg, away_xg) - 0.8) * 10)
+        conf = 66 + balance_bonus + max(0, (min(home_xg, away_xg) - 0.85) * 10)
     elif pick_type == "over_2_5":
         conf = 67 + max(0, (total_xg - 2.35) * 12)
     else:
@@ -387,15 +379,15 @@ def estimate_market_confidence(pick_type: str, hs: float, aws: float, home_xg: f
 
 def estimate_odds_from_confidence(confidence: int, pick_type: str) -> float:
     if pick_type == "winner":
-        base = 2.35 - (confidence - 60) * 0.025
+        base = 2.32 - (confidence - 60) * 0.024
     elif pick_type == "over_2_5":
-        base = 2.45 - (confidence - 60) * 0.023
+        base = 2.42 - (confidence - 60) * 0.022
     elif pick_type == "btts_yes":
-        base = 2.50 - (confidence - 60) * 0.022
+        base = 2.48 - (confidence - 60) * 0.021
     else:
         base = 2.40 - (confidence - 60) * 0.020
 
-    return round(max(1.40, min(base, 2.60)), 2)
+    return round(max(1.42, min(base, 2.65)), 2)
 
 def odds_band(odds: float) -> str:
     if odds <= 1.70:
@@ -409,7 +401,7 @@ def choose_main_market(home: str, away: str, hs: float, aws: float, home_xg: flo
     total_xg = home_xg + away_xg
 
     winner = home if hs >= aws else away
-    btts = "Sí" if home_xg >= 1.0 and away_xg >= 0.9 and diff < 8 else "No"
+    btts = "Sí" if home_xg >= 1.05 and away_xg >= 0.92 and diff < 7.5 else "No"
     over = "Sí" if total_xg >= 2.65 else "No"
 
     options: List[Dict[str, Any]] = []
@@ -450,15 +442,15 @@ def build_tipster_explanation(
     hs: float,
     aws: float,
     main_pick: str,
+    band: str,
 ) -> str:
     return (
         f"{league}: {home} vs {away}. "
-        f"{winner} parte con ventaja por fuerza relativa estimada "
-        f"({round(hs,1)} vs {round(aws,1)}). "
+        f"{winner} parte con ventaja por fuerza relativa estimada ({round(hs,1)} vs {round(aws,1)}). "
         f"Proyección ofensiva aproximada: {home_xg} - {away_xg} xG. "
         f"BTTS: {btts}. Over 2.5: {over25}. "
         f"Tarjetas estimadas: {home} {cards.get(home, 0)} / {away} {cards.get(away, 0)}. "
-        f"Pick principal: {main_pick}."
+        f"Pick principal: {main_pick}. Perfil de cuota: {band}."
     )
 
 def build_pick_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -478,7 +470,8 @@ def build_pick_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
     band = odds_band(odds_est)
 
     explanation = build_tipster_explanation(
-        league, home, away, winner, btts, over25, cards, home_xg, away_xg, hs, aws, main_pick["pick"]
+        league, home, away, winner, btts, over25, cards,
+        home_xg, away_xg, hs, aws, main_pick["pick"], band
     )
 
     return {
@@ -491,7 +484,7 @@ def build_pick_from_event(event: Dict[str, Any]) -> Dict[str, Any]:
         "pick_type": main_pick["pick_type"],
         "confidence": main_pick["confidence"],
         "odds_estimate": odds_est,
-        "odds_band": band,
+        "odds_band": band,  # normal / media / alta
         "pick_winner": winner,
         "btts": btts,
         "over_2_5": over25,
@@ -533,26 +526,6 @@ def resolve_pick_status(pick: Dict[str, Any], score_obj: Dict[str, Any]) -> Tupl
         return ("won" if (home_goals + away_goals) >= 3 else "lost"), score_line
 
     return "pending", score_line
-
-def get_recent_events_for_scoring() -> Dict[int, Dict[str, Any]]:
-    start = now_local() - timedelta(days=SCORE_REFRESH_DAYS_BACK)
-    end = now_local() + timedelta(days=1)
-
-    event_map: Dict[int, Dict[str, Any]] = {}
-
-    for code, meta in COMPETITIONS.items():
-        try:
-            matches = fetch_matches_for_competition(code, start, end)
-        except Exception:
-            continue
-
-        for match in matches:
-            event = build_event_from_match(match, meta["name"], int(meta["priority"]))
-            if not event or event.get("id") is None:
-                continue
-            event_map[int(event["id"])] = event
-
-    return event_map
 
 def refresh_scores_for_history(history: Dict[str, Any]) -> Dict[str, Any]:
     history.setdefault("days", {})
@@ -629,11 +602,22 @@ def select_top_picks(picks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     )
     return picks[:MAX_PICKS]
 
+def group_picks_by_band(picks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    return {
+        "normal": [p for p in picks if p.get("odds_band") == "normal"],
+        "media": [p for p in picks if p.get("odds_band") == "media"],
+        "alta": [p for p in picks if p.get("odds_band") == "alta"],
+    }
+
 def build_combo_of_day(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
     eligible = [p for p in picks if p["confidence"] >= 80]
     eligible = sorted(
         eligible,
-        key=lambda x: (x["confidence"], -x["odds_estimate"], competition_priority(x["league"])),
+        key=lambda x: (
+            x["confidence"],
+            -x["odds_estimate"],
+            competition_priority(x["league"]),
+        ),
         reverse=True,
     )
 
@@ -699,6 +683,7 @@ def build_payload(league: Optional[str] = None) -> Dict[str, Any]:
 
     picks = select_top_picks(picks)
     combo = build_combo_of_day(picks)
+    groups = group_picks_by_band(picks)
 
     history = read_json(HISTORY_FILE)
     history = merge_today_history(history, picks)
@@ -711,6 +696,7 @@ def build_payload(league: Optional[str] = None) -> Dict[str, Any]:
         "count": len(picks),
         "picks": picks,
         "combo_of_day": combo,
+        "groups": groups,
     }
 
     if not league:
@@ -747,6 +733,7 @@ def get_picks(
             picks = [p for p in picks if lf in normalize_text(p.get("league"))]
 
         combo = build_combo_of_day(picks)
+        groups = group_picks_by_band(picks)
 
         return {
             "generated_at": payload.get("generated_at"),
@@ -755,6 +742,7 @@ def get_picks(
             "count": len(picks),
             "picks": picks,
             "combo_of_day": combo,
+            "groups": groups,
         }
 
     except Exception as e:
@@ -766,6 +754,7 @@ def get_picks(
             "count": 0,
             "picks": [],
             "combo_of_day": {},
+            "groups": {"normal": [], "media": [], "alta": []},
         }
 
 @app.get("/api/history")
