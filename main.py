@@ -30,11 +30,12 @@ CACHE_FILE = "cache.json"
 HISTORY_FILE = "history.json"
 API_STATE_FILE = "api_state.json"
 
-LOOKAHEAD_HOURS = 96
+LOOKAHEAD_HOURS = 168
 CACHE_REFRESH_MINUTES = 15
-MAX_PICKS = 12
+MAX_PICKS = 20
 MAX_HISTORY_DAYS = 10
 API_COOLDOWN_MINUTES = 10
+MIN_CONFIDENCE = 68
 
 # prioridad de fuente al deduplicar
 API_PRIORITY = ["api_football", "football_data", "allsports", "sportsdb"]
@@ -58,9 +59,7 @@ FOOTBALL_DATA_LEAGUES = {
 }
 
 # AllSportsAPI
-# league ids frecuentes:
-# LaLiga = 302
-# Champions League = 3
+# IDs orientativos usados habitualmente
 ALLSPORTS_LEAGUES = {
     302: "LaLiga",
     3: "Champions League",
@@ -132,7 +131,7 @@ TEAM_RATINGS = {
     "Sporting Lisbon": 83,
 }
 
-app = FastAPI(title="Top Picks Pro")
+app = FastAPI(title="Top Picks Pro Premium")
 
 app.add_middleware(
     CORSMiddleware,
@@ -203,6 +202,18 @@ def current_api_football_season() -> int:
     now = now_local()
     return now.year if now.month >= 7 else now.year - 1
 
+def parse_requests_error(e: Exception) -> str:
+    text = str(e)
+    if "429" in text:
+        return "rate_limit"
+    return text[:300]
+
+def source_priority(source: str) -> int:
+    try:
+        return API_PRIORITY.index(source)
+    except ValueError:
+        return 999
+
 # =========================================================
 # API STATE / COOLDOWN
 # =========================================================
@@ -244,18 +255,6 @@ def api_is_available(api_name: str) -> bool:
     if dt.tzinfo is None:
         dt = TZ.localize(dt)
     return now_local() >= dt.astimezone(TZ)
-
-def parse_requests_error(e: Exception) -> str:
-    text = str(e)
-    if "429" in text:
-        return "rate_limit"
-    return text[:300]
-
-def source_priority(source: str) -> int:
-    try:
-        return API_PRIORITY.index(source)
-    except ValueError:
-        return 999
 
 # =========================================================
 # THESPORTSDB
@@ -508,10 +507,10 @@ def allsports_get(params: Dict[str, Any]) -> Dict[str, Any]:
     if not ALLSPORTS_API_KEY:
         raise RuntimeError("Falta ALLSPORTS_API_KEY")
 
-    base_params = {"APIkey": ALLSPORTS_API_KEY}
-    base_params.update(params)
+    merged_params = {"APIkey": ALLSPORTS_API_KEY}
+    merged_params.update(params)
 
-    r = requests.get(ALLSPORTS_BASE_URL, params=base_params, timeout=15)
+    r = requests.get(ALLSPORTS_BASE_URL, params=merged_params, timeout=15)
     r.raise_for_status()
     return r.json()
 
@@ -522,8 +521,6 @@ def parse_allsports_datetime(event_date: Optional[str], event_time: Optional[str
     if not date_str:
         raise ValueError("Missing event_date")
 
-    # normalmente viene ya en hora local del feed
-    # lo tratamos como Europe/Madrid
     if len(time_str) == 5:
         dt_naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
     else:
@@ -750,7 +747,7 @@ def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
 def build_picks() -> List[Dict[str, Any]]:
     matches = get_real_matches()
     picks = [build_pick(m) for m in matches]
-    picks = [p for p in picks if p["confidence"] >= 72]
+    picks = [p for p in picks if p["confidence"] >= MIN_CONFIDENCE]
     picks.sort(key=lambda x: (x["confidence"], x["odds_estimate"]), reverse=True)
     return picks[:MAX_PICKS]
 
@@ -869,7 +866,10 @@ def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"ok": True, "msg": "API funcionando con 4 APIs reales, cooldown automático y sin fallback"}
+    return {
+        "ok": True,
+        "msg": "API funcionando con 4 APIs reales, premium, sin fallback"
+    }
 
 @app.get("/test")
 def test():
