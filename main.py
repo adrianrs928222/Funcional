@@ -750,7 +750,7 @@ def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
 def build_picks() -> List[Dict[str, Any]]:
     matches = get_real_matches()
     picks = [build_pick(m) for m in matches]
-    picks = [p for p in picks if p["confidence"] >= 72]
+    picks = [p for p in picks if p["confidence"] >= 68]
     picks.sort(key=lambda x: (x["confidence"], x["odds_estimate"]), reverse=True)
     return picks[:MAX_PICKS]
 
