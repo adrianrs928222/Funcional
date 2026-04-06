@@ -28,9 +28,10 @@ MIN_REAL_MATCHES_BEFORE_FALLBACK = 4
 
 LEAGUES = {
     "4328": "LaLiga",
-    "4335": "Segunda División",
     "4480": "Champions League",
 }
+
+SEASON_CANDIDATES = ["2025-2026", "2024-2025"]
 
 TEAM_RATINGS = {
     # LaLiga
@@ -52,23 +53,7 @@ TEAM_RATINGS = {
     "Las Palmas": 72,
     "Alaves": 73,
 
-    # Segunda
-    "CD Castellon": 71,
-    "Granada": 76,
-    "Sporting Gijon": 73,
-    "Real Sociedad B": 70,
-    "Real Oviedo": 74,
-    "Levante": 75,
-    "Elche": 75,
-    "Eibar": 74,
-    "Real Zaragoza": 73,
-    "Cadiz": 75,
-    "Espanyol": 77,
-    "Tenerife": 71,
-    "Burgos": 71,
-    "Albacete": 71,
-
-    # Champions
+    # Champions / Europa top
     "Manchester City": 94,
     "Arsenal": 91,
     "Liverpool": 91,
@@ -93,11 +78,6 @@ FALLBACK_MATCHES = [
     {"id": 700002, "league": "LaLiga", "home_team": "Valencia", "away_team": "Sevilla", "hour_offset": 22},
     {"id": 700003, "league": "LaLiga", "home_team": "Real Betis", "away_team": "Osasuna", "hour_offset": 28},
     {"id": 700004, "league": "LaLiga", "home_team": "Athletic Club", "away_team": "Getafe", "hour_offset": 34},
-
-    {"id": 710001, "league": "Segunda División", "home_team": "CD Castellon", "away_team": "Granada", "hour_offset": 17},
-    {"id": 710002, "league": "Segunda División", "home_team": "Sporting Gijon", "away_team": "Real Sociedad B", "hour_offset": 19},
-    {"id": 710003, "league": "Segunda División", "home_team": "Levante", "away_team": "Elche", "hour_offset": 24},
-    {"id": 710004, "league": "Segunda División", "home_team": "Eibar", "away_team": "Real Zaragoza", "hour_offset": 29},
 
     {"id": 720001, "league": "Champions League", "home_team": "Manchester City", "away_team": "Bayern Munich", "hour_offset": 20},
     {"id": 720002, "league": "Champions League", "home_team": "Inter", "away_team": "Arsenal", "hour_offset": 26},
@@ -139,9 +119,6 @@ def write_json(path: str, data: Any) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
-
-def normalize_text(v: Optional[str]) -> str:
-    return (v or "").strip().lower()
 
 def cache_is_valid(cache: Dict[str, Any]) -> bool:
     if not cache:
@@ -212,6 +189,21 @@ def extract_home_away(event: Dict[str, Any]) -> Dict[str, str]:
 
     raise ValueError("No se pudo extraer home/away")
 
+def get_season_candidates(league_id: str) -> List[Dict[str, Any]]:
+    events: List[Dict[str, Any]] = []
+
+    for season in SEASON_CANDIDATES:
+        try:
+            data = sportsdb_get(f"/eventsseason.php?id={league_id}&s={season}")
+            season_events = data.get("events") or []
+            if season_events:
+                events.extend(season_events)
+                break
+        except Exception as e:
+            print(f"ERROR season {league_id} {season}: {e}")
+
+    return events
+
 def get_real_matches() -> List[Dict[str, Any]]:
     start = now_local()
     end = now_local() + timedelta(hours=LOOKAHEAD_HOURS)
@@ -219,11 +211,10 @@ def get_real_matches() -> List[Dict[str, Any]]:
 
     for league_id, league_name in LEAGUES.items():
         try:
-            data = sportsdb_get(f"/eventsnextleague.php?id={league_id}")
-            events = data.get("events") or []
+            events = get_season_candidates(league_id)
         except Exception as e:
             print(f"ERROR LEAGUE {league_id}: {e}")
-            continue
+            events = []
 
         for ev in events:
             try:
@@ -246,7 +237,7 @@ def get_real_matches() -> List[Dict[str, Any]]:
             })
 
     out.sort(key=lambda x: x["dt_local"])
-    return out
+    return out[:30]
 
 # =========================================================
 # FALLBACK
@@ -294,7 +285,6 @@ def merge_matches(real_matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def predict_cards(league: str, home_strength: float, away_strength: float, home: str, away: str) -> Dict[str, int]:
     base_cards = {
         "LaLiga": 5,
-        "Segunda División": 6,
         "Champions League": 4,
     }
     total = base_cards.get(league, 5)
@@ -541,7 +531,7 @@ def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"ok": True, "msg": "API funcionando con TheSportsDB v1 + fallback pro"}
+    return {"ok": True, "msg": "API funcionando con TheSportsDB v1 season + fallback"}
 
 @app.get("/test")
 def test():
