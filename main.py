@@ -249,21 +249,8 @@ def get_fallback_matches() -> List[Dict[str, Any]]:
 
 
 def merge_matches(real_matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    if len(real_matches) >= 4:
-        return real_matches[:MAX_PICKS]
-
-    seen = set()
-    merged = []
-
-    for m in real_matches + get_fallback_matches():
-        key = (m["league"], m["home_team"], m["away_team"])
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(m)
-
-    merged.sort(key=lambda x: x["dt_local"])
-    return merged[:MAX_PICKS]
+    real_matches.sort(key=lambda x: x["dt_local"])
+    return real_matches[:MAX_PICKS]
 
 
 def predict_cards(league: str, home_strength: float, away_strength: float, home: str, away: str) -> Dict[str, int]:
