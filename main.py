@@ -1,7 +1,7 @@
 import json
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pytz
 import requests
@@ -20,6 +20,9 @@ SPORTSDB_BASE_URL = f"https://www.thesportsdb.com/api/v1/json/{SPORTSDB_API_KEY}
 API_FOOTBALL_KEY = os.getenv("API_FOOTBALL_KEY", "").strip()
 API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 
+FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "").strip()
+FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
+
 CACHE_FILE = "cache.json"
 HISTORY_FILE = "history.json"
 
@@ -28,56 +31,85 @@ CACHE_REFRESH_HOURS = 6
 MAX_PICKS = 12
 MAX_HISTORY_DAYS = 10
 
-# IDs reales
-# SportsDB: 4328 LaLiga, 4480 Champions League
+# TheSportsDB
 SPORTSDB_LEAGUES = {
     "4328": "LaLiga",
     "4480": "Champions League",
 }
 
-# API-Football: 140 LaLiga, 2 Champions League
+# API-Football
 API_FOOTBALL_LEAGUES = {
     140: "LaLiga",
     2: "Champions League",
 }
 
+# Football-Data.org
+FOOTBALL_DATA_LEAGUES = {
+    "PD": "LaLiga",
+    "CL": "Champions League",
+}
+
 SEASON_CANDIDATES_SPORTSDB = ["2025-2026", "2024-2025"]
 
 TEAM_RATINGS = {
-    # LaLiga
     "Real Madrid": 93,
+    "Real Madrid CF": 93,
     "Barcelona": 91,
+    "FC Barcelona": 91,
     "Atletico Madrid": 87,
+    "Club Atlético de Madrid": 87,
     "Athletic Club": 84,
     "Real Sociedad": 82,
+    "Real Sociedad de Fútbol": 82,
     "Villarreal": 81,
+    "Villarreal CF": 81,
     "Real Betis": 80,
+    "Real Betis Balompié": 80,
     "Girona": 80,
+    "Girona FC": 80,
     "Valencia": 77,
+    "Valencia CF": 77,
     "Sevilla": 78,
+    "Sevilla FC": 78,
     "Osasuna": 76,
+    "CA Osasuna": 76,
     "Getafe": 74,
+    "Getafe CF": 74,
     "Mallorca": 74,
+    "RCD Mallorca": 74,
     "Rayo Vallecano": 75,
+    "Rayo Vallecano de Madrid": 75,
     "Celta Vigo": 75,
+    "RC Celta de Vigo": 75,
     "Las Palmas": 72,
+    "UD Las Palmas": 72,
     "Alaves": 73,
+    "Deportivo Alavés": 73,
 
-    # Champions / Europa top
     "Manchester City": 94,
+    "Manchester City FC": 94,
     "Arsenal": 91,
+    "Arsenal FC": 91,
     "Liverpool": 91,
+    "Liverpool FC": 91,
     "Bayern Munich": 92,
+    "FC Bayern München": 92,
     "Borussia Dortmund": 86,
-    "Paris Saint Germain": 91,
     "Paris SG": 91,
+    "Paris Saint Germain": 91,
+    "Paris Saint-Germain FC": 91,
     "Inter": 90,
+    "FC Internazionale Milano": 90,
     "Juventus": 86,
+    "Juventus FC": 86,
     "AC Milan": 86,
     "Napoli": 84,
+    "SSC Napoli": 84,
     "Benfica": 84,
+    "SL Benfica": 84,
     "FC Porto": 83,
     "PSV Eindhoven": 85,
+    "PSV": 85,
     "RB Leipzig": 84,
 }
 
@@ -98,10 +130,8 @@ app.add_middleware(
 def now_local() -> datetime:
     return datetime.now(TZ)
 
-
 def today_key() -> str:
     return now_local().strftime("%Y-%m-%d")
-
 
 def read_json(path: str) -> Any:
     if not os.path.exists(path):
@@ -112,40 +142,31 @@ def read_json(path: str) -> Any:
     except Exception:
         return {}
 
-
 def write_json(path: str, data: Any) -> None:
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
-
 def normalize_text(v: Optional[str]) -> str:
     return (v or "").strip().lower()
-
 
 def cache_is_valid(cache: Dict[str, Any]) -> bool:
     if not cache:
         return False
-
     if cache.get("cache_day") != today_key():
         return False
-
     generated_at = cache.get("generated_at")
     if not generated_at:
         return False
-
     try:
         dt = datetime.fromisoformat(generated_at)
     except Exception:
         return False
-
     if dt.tzinfo is None:
         dt = TZ.localize(dt)
-
     age = now_local() - dt.astimezone(TZ)
     return age < timedelta(hours=CACHE_REFRESH_HOURS)
-
 
 def stable_team_rating(team_name: str) -> float:
     if team_name in TEAM_RATINGS:
@@ -153,14 +174,12 @@ def stable_team_rating(team_name: str) -> float:
     h = abs(hash(team_name)) % 1000
     return 68 + (h / 1000) * 14
 
-
 def current_api_football_season() -> int:
     now = now_local()
     return now.year if now.month >= 7 else now.year - 1
 
-
 # =========================================================
-# SPORTSDB
+# THESPORTSDB
 # =========================================================
 
 def sportsdb_get(path: str) -> Dict[str, Any]:
@@ -169,17 +188,13 @@ def sportsdb_get(path: str) -> Dict[str, Any]:
     r.raise_for_status()
     return r.json()
 
-
 def parse_sportsdb_datetime(date_str: Optional[str], time_str: Optional[str]) -> datetime:
     date_str = (date_str or "").strip()
     time_str = (time_str or "00:00:00").strip().replace("Z", "")
-
     if not date_str:
         raise ValueError("Missing dateEvent")
-
     dt_utc = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.UTC)
     return dt_utc.astimezone(TZ)
-
 
 def extract_home_away_sportsdb(event: Dict[str, Any]) -> Dict[str, str]:
     home = (event.get("strHomeTeam") or "").strip()
@@ -189,21 +204,17 @@ def extract_home_away_sportsdb(event: Dict[str, Any]) -> Dict[str, str]:
         return {"home": home, "away": away}
 
     event_name = (event.get("strEvent") or "").strip()
-
     if " vs " in event_name:
         a, b = event_name.split(" vs ", 1)
         return {"home": a.strip(), "away": b.strip()}
-
     if " - " in event_name:
         a, b = event_name.split(" - ", 1)
         return {"home": a.strip(), "away": b.strip()}
 
     raise ValueError("No se pudo extraer home/away")
 
-
 def get_sportsdb_season_events(league_id: str) -> List[Dict[str, Any]]:
     all_events: List[Dict[str, Any]] = []
-
     for season in SEASON_CANDIDATES_SPORTSDB:
         try:
             data = sportsdb_get(f"/eventsseason.php?id={league_id}&s={season}")
@@ -213,9 +224,7 @@ def get_sportsdb_season_events(league_id: str) -> List[Dict[str, Any]]:
                 break
         except Exception as e:
             print(f"SPORTSDB season error {league_id} {season}: {e}")
-
     return all_events
-
 
 def get_sportsdb_next_events(league_id: str) -> List[Dict[str, Any]]:
     try:
@@ -224,7 +233,6 @@ def get_sportsdb_next_events(league_id: str) -> List[Dict[str, Any]]:
     except Exception as e:
         print(f"SPORTSDB next error {league_id}: {e}")
         return []
-
 
 def get_sportsdb_matches() -> List[Dict[str, Any]]:
     start = now_local()
@@ -264,18 +272,15 @@ def get_sportsdb_matches() -> List[Dict[str, Any]]:
     out.sort(key=lambda x: x["dt_local"])
     return out
 
-
 # =========================================================
-# API-FOOTBALL (API-SPORTS DIRECTA)
+# API-FOOTBALL
 # =========================================================
 
 def api_football_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not API_FOOTBALL_KEY:
         raise RuntimeError("Falta API_FOOTBALL_KEY")
 
-    headers = {
-        "x-apisports-key": API_FOOTBALL_KEY,
-    }
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
 
     r = requests.get(
         f"{API_FOOTBALL_BASE_URL}{path}",
@@ -285,7 +290,6 @@ def api_football_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict
     )
     r.raise_for_status()
     return r.json()
-
 
 def get_api_football_matches() -> List[Dict[str, Any]]:
     start = now_local()
@@ -314,21 +318,17 @@ def get_api_football_matches() -> List[Dict[str, Any]]:
             continue
 
         items = data.get("response") or []
-
         for item in items:
             try:
                 fixture = item.get("fixture") or {}
                 teams = item.get("teams") or {}
-
                 home = (teams.get("home") or {}).get("name")
                 away = (teams.get("away") or {}).get("name")
                 date_str = fixture.get("date")
-
                 if not home or not away or not date_str:
                     continue
 
                 dt_local = datetime.fromisoformat(date_str.replace("Z", "+00:00")).astimezone(TZ)
-
                 if not (start <= dt_local <= end):
                     continue
 
@@ -347,24 +347,97 @@ def get_api_football_matches() -> List[Dict[str, Any]]:
     out.sort(key=lambda x: x["dt_local"])
     return out
 
+# =========================================================
+# FOOTBALL-DATA.ORG
+# =========================================================
+
+def football_data_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not FOOTBALL_DATA_API_KEY:
+        raise RuntimeError("Falta FOOTBALL_DATA_API_KEY")
+
+    headers = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
+
+    r = requests.get(
+        f"{FOOTBALL_DATA_BASE_URL}{path}",
+        headers=headers,
+        params=params or {},
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+def get_football_data_matches() -> List[Dict[str, Any]]:
+    start = now_local()
+    end = now_local() + timedelta(hours=LOOKAHEAD_HOURS)
+
+    start_date = start.date().isoformat()
+    end_date = end.date().isoformat()
+
+    out: List[Dict[str, Any]] = []
+
+    for code, league_name in FOOTBALL_DATA_LEAGUES.items():
+        try:
+            data = football_data_get(
+                f"/competitions/{code}/matches",
+                {
+                    "dateFrom": start_date,
+                    "dateTo": end_date,
+                },
+            )
+        except Exception as e:
+            print(f"Football-Data error league {code}: {e}")
+            continue
+
+        items = data.get("matches") or []
+        for item in items:
+            try:
+                utc_date = item.get("utcDate")
+                home = ((item.get("homeTeam") or {}).get("name") or "").strip()
+                away = ((item.get("awayTeam") or {}).get("name") or "").strip()
+                if not utc_date or not home or not away:
+                    continue
+
+                dt_local = datetime.fromisoformat(utc_date.replace("Z", "+00:00")).astimezone(TZ)
+                if not (start <= dt_local <= end):
+                    continue
+
+                out.append({
+                    "id": item.get("id"),
+                    "match": f"{home} vs {away}",
+                    "league": league_name,
+                    "home_team": home,
+                    "away_team": away,
+                    "dt_local": dt_local,
+                    "source": "football_data",
+                })
+            except Exception:
+                continue
+
+    out.sort(key=lambda x: x["dt_local"])
+    return out
 
 # =========================================================
-# MERGE REAL SOURCES ONLY
+# MERGE 3 APIs - REAL ONLY
 # =========================================================
 
 def get_real_matches() -> List[Dict[str, Any]]:
     sportsdb_matches = get_sportsdb_matches()
     api_football_matches = get_api_football_matches()
+    football_data_matches = get_football_data_matches()
 
-    combined = sportsdb_matches + api_football_matches
+    combined = sportsdb_matches + api_football_matches + football_data_matches
 
     seen = set()
     unique = []
 
     for m in combined:
-        # deduplicación por equipos y fecha aproximada
         date_key = m["dt_local"].strftime("%Y-%m-%d %H:%M")
-        key = (normalize_text(m["home_team"]), normalize_text(m["away_team"]), normalize_text(m["league"]), date_key)
+        key = (
+            normalize_text(m["home_team"]),
+            normalize_text(m["away_team"]),
+            normalize_text(m["league"]),
+            date_key,
+        )
 
         if key in seen:
             continue
@@ -373,7 +446,6 @@ def get_real_matches() -> List[Dict[str, Any]]:
 
     unique.sort(key=lambda x: x["dt_local"])
     return unique[:MAX_PICKS]
-
 
 # =========================================================
 # PICK MODEL
@@ -398,7 +470,6 @@ def predict_cards(league: str, home_strength: float, away_strength: float, home:
 
     return {home: int(home_cards), away: int(away_cards)}
 
-
 def estimate_odds_from_confidence(confidence: int, pick_type: str) -> float:
     if pick_type == "winner":
         base = 2.30 - (confidence - 60) * 0.024
@@ -408,14 +479,12 @@ def estimate_odds_from_confidence(confidence: int, pick_type: str) -> float:
         base = 2.48 - (confidence - 60) * 0.021
     return round(max(1.42, min(base, 2.60)), 2)
 
-
 def odds_band(odds: float) -> str:
     if odds <= 1.70:
         return "normal"
     if odds <= 2.05:
         return "media"
     return "alta"
-
 
 def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
     home = match["home_team"]
@@ -500,7 +569,6 @@ def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
         "source": match.get("source", "unknown"),
     }
 
-
 def build_picks() -> List[Dict[str, Any]]:
     matches = get_real_matches()
     picks = [build_pick(m) for m in matches]
@@ -508,10 +576,8 @@ def build_picks() -> List[Dict[str, Any]]:
     picks.sort(key=lambda x: (x["confidence"], x["odds_estimate"]), reverse=True)
     return picks[:MAX_PICKS]
 
-
 def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
     eligible = [p for p in picks if p["confidence"] >= 80]
-
     combo = []
     used = set()
 
@@ -543,14 +609,12 @@ def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
         "picks": combo,
     }
 
-
 def group_picks(picks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     return {
         "normal": [p for p in picks if p["odds_band"] == "normal"],
         "media": [p for p in picks if p["odds_band"] == "media"],
         "alta": [p for p in picks if p["odds_band"] == "alta"],
     }
-
 
 # =========================================================
 # HISTORY
@@ -567,14 +631,12 @@ def refresh_history_stats(history: Dict[str, Any]) -> Dict[str, Any]:
         }
     return history
 
-
 def trim_history(history: Dict[str, Any]) -> Dict[str, Any]:
     days_obj = history.get("days", {})
     sorted_keys = sorted(days_obj.keys(), reverse=True)
     keep = set(sorted_keys[:MAX_HISTORY_DAYS])
     history["days"] = {k: v for k, v in days_obj.items() if k in keep}
     return history
-
 
 def merge_today_history(history: Dict[str, Any], picks: List[Dict[str, Any]]) -> Dict[str, Any]:
     history.setdefault("days", {})
@@ -583,20 +645,16 @@ def merge_today_history(history: Dict[str, Any], picks: List[Dict[str, Any]]) ->
     history = trim_history(history)
     return history
 
-
 def history_to_frontend(history: Dict[str, Any]) -> Dict[str, Any]:
     days_obj = history.get("days", {})
     days_list = []
-
     for day, data in sorted(days_obj.items(), reverse=True):
         days_list.append({
             "date": day,
             "stats": data.get("stats", {"won": 0, "lost": 0, "pending": 0}),
             "picks": data.get("picks", []),
         })
-
     return {"days": days_list}
-
 
 # =========================================================
 # PAYLOAD / CACHE
@@ -622,13 +680,11 @@ def build_payload() -> Dict[str, Any]:
 
     return payload
 
-
 def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
     cache = read_json(CACHE_FILE)
     if not force_refresh and cache_is_valid(cache):
         return cache
     return build_payload()
-
 
 # =========================================================
 # ROUTES
@@ -636,25 +692,25 @@ def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"ok": True, "msg": "API funcionando con TheSportsDB + API-Football, sin fallback"}
-
+    return {"ok": True, "msg": "API funcionando con 3 APIs reales, sin fallback"}
 
 @app.get("/test")
 def test():
     return {"ok": True}
-
 
 @app.get("/test-api")
 def test_api():
     try:
         sportsdb_matches = get_sportsdb_matches()
         api_football_matches = get_api_football_matches()
+        football_data_matches = get_football_data_matches()
         merged = get_real_matches()
 
         return {
             "ok": True,
             "sportsdb_count": len(sportsdb_matches),
             "api_football_count": len(api_football_matches),
+            "football_data_count": len(football_data_matches),
             "final_count": len(merged),
             "matches": [
                 {
@@ -668,7 +724,6 @@ def test_api():
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
-
 
 @app.get("/api/picks")
 def picks(force_refresh: bool = Query(False)):
@@ -686,7 +741,6 @@ def picks(force_refresh: bool = Query(False)):
             "groups": {"normal": [], "media": [], "alta": []},
         }
 
-
 @app.get("/api/history")
 def history():
     try:
@@ -697,7 +751,6 @@ def history():
         return history_to_frontend(raw)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
-
 
 if __name__ == "__main__":
     import uvicorn
