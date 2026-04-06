@@ -1,7 +1,7 @@
 import json
 import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
 import requests
@@ -25,11 +25,18 @@ FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
 
 CACHE_FILE = "cache.json"
 HISTORY_FILE = "history.json"
+API_STATE_FILE = "api_state.json"
 
 LOOKAHEAD_HOURS = 96
-CACHE_REFRESH_HOURS = 6
+CACHE_REFRESH_MINUTES = 15
 MAX_PICKS = 12
 MAX_HISTORY_DAYS = 10
+
+# cooldown si una API falla o devuelve rate limit
+API_COOLDOWN_MINUTES = 10
+
+# prioridad de uso
+API_PRIORITY = ["sportsdb", "football_data", "api_football"]
 
 # TheSportsDB
 SPORTSDB_LEAGUES = {
@@ -95,8 +102,8 @@ TEAM_RATINGS = {
     "Bayern Munich": 92,
     "FC Bayern München": 92,
     "Borussia Dortmund": 86,
-    "Paris SG": 91,
     "Paris Saint Germain": 91,
+    "Paris SG": 91,
     "Paris Saint-Germain FC": 91,
     "Inter": 90,
     "FC Internazionale Milano": 90,
@@ -124,14 +131,8 @@ app.add_middleware(
 )
 
 # =========================================================
-# UTILS
+# FILE UTILS
 # =========================================================
-
-def now_local() -> datetime:
-    return datetime.now(TZ)
-
-def today_key() -> str:
-    return now_local().strftime("%Y-%m-%d")
 
 def read_json(path: str) -> Any:
     if not os.path.exists(path):
@@ -148,25 +149,37 @@ def write_json(path: str, data: Any) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
+# =========================================================
+# TIME / NORMALIZE
+# =========================================================
+
+def now_local() -> datetime:
+    return datetime.now(TZ)
+
+def today_key() -> str:
+    return now_local().strftime("%Y-%m-%d")
+
 def normalize_text(v: Optional[str]) -> str:
     return (v or "").strip().lower()
 
 def cache_is_valid(cache: Dict[str, Any]) -> bool:
     if not cache:
         return False
-    if cache.get("cache_day") != today_key():
-        return False
+
     generated_at = cache.get("generated_at")
     if not generated_at:
         return False
+
     try:
         dt = datetime.fromisoformat(generated_at)
     except Exception:
         return False
+
     if dt.tzinfo is None:
         dt = TZ.localize(dt)
+
     age = now_local() - dt.astimezone(TZ)
-    return age < timedelta(hours=CACHE_REFRESH_HOURS)
+    return age < timedelta(minutes=CACHE_REFRESH_MINUTES)
 
 def stable_team_rating(team_name: str) -> float:
     if team_name in TEAM_RATINGS:
@@ -177,6 +190,55 @@ def stable_team_rating(team_name: str) -> float:
 def current_api_football_season() -> int:
     now = now_local()
     return now.year if now.month >= 7 else now.year - 1
+
+# =========================================================
+# API STATE / COOLDOWN
+# =========================================================
+
+def load_api_state() -> Dict[str, Any]:
+    state = read_json(API_STATE_FILE)
+    state.setdefault("sportsdb", {})
+    state.setdefault("football_data", {})
+    state.setdefault("api_football", {})
+    return state
+
+def save_api_state(state: Dict[str, Any]) -> None:
+    write_json(API_STATE_FILE, state)
+
+def set_api_cooldown(api_name: str, reason: str) -> None:
+    state = load_api_state()
+    until = now_local() + timedelta(minutes=API_COOLDOWN_MINUTES)
+    state.setdefault(api_name, {})
+    state[api_name]["cooldown_until"] = until.isoformat()
+    state[api_name]["last_error"] = reason
+    save_api_state(state)
+
+def clear_api_cooldown(api_name: str) -> None:
+    state = load_api_state()
+    state.setdefault(api_name, {})
+    state[api_name]["cooldown_until"] = None
+    state[api_name]["last_error"] = None
+    save_api_state(state)
+
+def api_is_available(api_name: str) -> bool:
+    state = load_api_state()
+    info = state.get(api_name) or {}
+    cooldown_until = info.get("cooldown_until")
+    if not cooldown_until:
+        return True
+    try:
+        dt = datetime.fromisoformat(cooldown_until)
+    except Exception:
+        return True
+    if dt.tzinfo is None:
+        dt = TZ.localize(dt)
+    return now_local() >= dt.astimezone(TZ)
+
+def parse_requests_error(e: Exception) -> str:
+    text = str(e)
+    if "429" in text:
+        return "rate_limit"
+    return text[:300]
 
 # =========================================================
 # THESPORTSDB
@@ -191,8 +253,10 @@ def sportsdb_get(path: str) -> Dict[str, Any]:
 def parse_sportsdb_datetime(date_str: Optional[str], time_str: Optional[str]) -> datetime:
     date_str = (date_str or "").strip()
     time_str = (time_str or "00:00:00").strip().replace("Z", "")
+
     if not date_str:
         raise ValueError("Missing dateEvent")
+
     dt_utc = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.UTC)
     return dt_utc.astimezone(TZ)
 
@@ -204,73 +268,77 @@ def extract_home_away_sportsdb(event: Dict[str, Any]) -> Dict[str, str]:
         return {"home": home, "away": away}
 
     event_name = (event.get("strEvent") or "").strip()
+
     if " vs " in event_name:
         a, b = event_name.split(" vs ", 1)
         return {"home": a.strip(), "away": b.strip()}
+
     if " - " in event_name:
         a, b = event_name.split(" - ", 1)
         return {"home": a.strip(), "away": b.strip()}
 
     raise ValueError("No se pudo extraer home/away")
 
-def get_sportsdb_season_events(league_id: str) -> List[Dict[str, Any]]:
-    all_events: List[Dict[str, Any]] = []
-    for season in SEASON_CANDIDATES_SPORTSDB:
-        try:
-            data = sportsdb_get(f"/eventsseason.php?id={league_id}&s={season}")
-            events = data.get("events") or []
-            if events:
-                all_events.extend(events)
-                break
-        except Exception as e:
-            print(f"SPORTSDB season error {league_id} {season}: {e}")
-    return all_events
-
-def get_sportsdb_next_events(league_id: str) -> List[Dict[str, Any]]:
-    try:
-        data = sportsdb_get(f"/eventsnextleague.php?id={league_id}")
-        return data.get("events") or []
-    except Exception as e:
-        print(f"SPORTSDB next error {league_id}: {e}")
+def get_sportsdb_matches() -> List[Dict[str, Any]]:
+    if not api_is_available("sportsdb"):
         return []
 
-def get_sportsdb_matches() -> List[Dict[str, Any]]:
     start = now_local()
     end = now_local() + timedelta(hours=LOOKAHEAD_HOURS)
-
     out: List[Dict[str, Any]] = []
     seen = set()
 
-    for league_id, league_name in SPORTSDB_LEAGUES.items():
-        events = get_sportsdb_season_events(league_id) + get_sportsdb_next_events(league_id)
+    try:
+        for league_id, league_name in SPORTSDB_LEAGUES.items():
+            events: List[Dict[str, Any]] = []
 
-        for ev in events:
+            for season in SEASON_CANDIDATES_SPORTSDB:
+                try:
+                    data = sportsdb_get(f"/eventsseason.php?id={league_id}&s={season}")
+                    season_events = data.get("events") or []
+                    if season_events:
+                        events.extend(season_events)
+                        break
+                except Exception:
+                    pass
+
             try:
-                teams = extract_home_away_sportsdb(ev)
-                dt_local = parse_sportsdb_datetime(ev.get("dateEvent"), ev.get("strTime"))
+                next_data = sportsdb_get(f"/eventsnextleague.php?id={league_id}")
+                events.extend(next_data.get("events") or [])
             except Exception:
-                continue
+                pass
 
-            if not (start <= dt_local <= end):
-                continue
+            for ev in events:
+                try:
+                    teams = extract_home_away_sportsdb(ev)
+                    dt_local = parse_sportsdb_datetime(ev.get("dateEvent"), ev.get("strTime"))
+                except Exception:
+                    continue
 
-            key = (league_name, teams["home"], teams["away"], dt_local.isoformat())
-            if key in seen:
-                continue
-            seen.add(key)
+                if not (start <= dt_local <= end):
+                    continue
 
-            out.append({
-                "id": ev.get("idEvent") or f"sportsdb-{league_id}-{teams['home']}-{teams['away']}",
-                "match": f"{teams['home']} vs {teams['away']}",
-                "league": league_name,
-                "home_team": teams["home"],
-                "away_team": teams["away"],
-                "dt_local": dt_local,
-                "source": "sportsdb",
-            })
+                key = (league_name, teams["home"], teams["away"], dt_local.isoformat())
+                if key in seen:
+                    continue
+                seen.add(key)
 
-    out.sort(key=lambda x: x["dt_local"])
-    return out
+                out.append({
+                    "id": ev.get("idEvent") or f"sportsdb-{league_id}-{teams['home']}-{teams['away']}",
+                    "match": f"{teams['home']} vs {teams['away']}",
+                    "league": league_name,
+                    "home_team": teams["home"],
+                    "away_team": teams["away"],
+                    "dt_local": dt_local,
+                    "source": "sportsdb",
+                })
+
+        clear_api_cooldown("sportsdb")
+        out.sort(key=lambda x: x["dt_local"])
+        return out
+    except Exception as e:
+        set_api_cooldown("sportsdb", parse_requests_error(e))
+        return []
 
 # =========================================================
 # API-FOOTBALL
@@ -292,17 +360,18 @@ def api_football_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict
     return r.json()
 
 def get_api_football_matches() -> List[Dict[str, Any]]:
+    if not api_is_available("api_football"):
+        return []
+
     start = now_local()
     end = now_local() + timedelta(hours=LOOKAHEAD_HOURS)
-
     start_date = start.date().isoformat()
     end_date = end.date().isoformat()
-
-    out: List[Dict[str, Any]] = []
     season = current_api_football_season()
+    out: List[Dict[str, Any]] = []
 
-    for league_id, league_name in API_FOOTBALL_LEAGUES.items():
-        try:
+    try:
+        for league_id, league_name in API_FOOTBALL_LEAGUES.items():
             data = api_football_get(
                 "/fixtures",
                 {
@@ -313,39 +382,42 @@ def get_api_football_matches() -> List[Dict[str, Any]]:
                     "timezone": "Europe/Madrid",
                 },
             )
-        except Exception as e:
-            print(f"API-Football error league {league_id}: {e}")
-            continue
 
-        items = data.get("response") or []
-        for item in items:
-            try:
-                fixture = item.get("fixture") or {}
-                teams = item.get("teams") or {}
-                home = (teams.get("home") or {}).get("name")
-                away = (teams.get("away") or {}).get("name")
-                date_str = fixture.get("date")
-                if not home or not away or not date_str:
+            items = data.get("response") or []
+            for item in items:
+                try:
+                    fixture = item.get("fixture") or {}
+                    teams = item.get("teams") or {}
+
+                    home = (teams.get("home") or {}).get("name")
+                    away = (teams.get("away") or {}).get("name")
+                    date_str = fixture.get("date")
+
+                    if not home or not away or not date_str:
+                        continue
+
+                    dt_local = datetime.fromisoformat(date_str.replace("Z", "+00:00")).astimezone(TZ)
+                    if not (start <= dt_local <= end):
+                        continue
+
+                    out.append({
+                        "id": fixture.get("id"),
+                        "match": f"{home} vs {away}",
+                        "league": league_name,
+                        "home_team": home,
+                        "away_team": away,
+                        "dt_local": dt_local,
+                        "source": "api_football",
+                    })
+                except Exception:
                     continue
 
-                dt_local = datetime.fromisoformat(date_str.replace("Z", "+00:00")).astimezone(TZ)
-                if not (start <= dt_local <= end):
-                    continue
-
-                out.append({
-                    "id": fixture.get("id"),
-                    "match": f"{home} vs {away}",
-                    "league": league_name,
-                    "home_team": home,
-                    "away_team": away,
-                    "dt_local": dt_local,
-                    "source": "api_football",
-                })
-            except Exception:
-                continue
-
-    out.sort(key=lambda x: x["dt_local"])
-    return out
+        clear_api_cooldown("api_football")
+        out.sort(key=lambda x: x["dt_local"])
+        return out
+    except Exception as e:
+        set_api_cooldown("api_football", parse_requests_error(e))
+        return []
 
 # =========================================================
 # FOOTBALL-DATA.ORG
@@ -367,16 +439,17 @@ def football_data_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dic
     return r.json()
 
 def get_football_data_matches() -> List[Dict[str, Any]]:
+    if not api_is_available("football_data"):
+        return []
+
     start = now_local()
     end = now_local() + timedelta(hours=LOOKAHEAD_HOURS)
-
     start_date = start.date().isoformat()
     end_date = end.date().isoformat()
-
     out: List[Dict[str, Any]] = []
 
-    for code, league_name in FOOTBALL_DATA_LEAGUES.items():
-        try:
+    try:
+        for code, league_name in FOOTBALL_DATA_LEAGUES.items():
             data = football_data_get(
                 f"/competitions/{code}/matches",
                 {
@@ -384,51 +457,64 @@ def get_football_data_matches() -> List[Dict[str, Any]]:
                     "dateTo": end_date,
                 },
             )
-        except Exception as e:
-            print(f"Football-Data error league {code}: {e}")
-            continue
 
-        items = data.get("matches") or []
-        for item in items:
-            try:
-                utc_date = item.get("utcDate")
-                home = ((item.get("homeTeam") or {}).get("name") or "").strip()
-                away = ((item.get("awayTeam") or {}).get("name") or "").strip()
-                if not utc_date or not home or not away:
+            items = data.get("matches") or []
+            for item in items:
+                try:
+                    utc_date = item.get("utcDate")
+                    home = ((item.get("homeTeam") or {}).get("name") or "").strip()
+                    away = ((item.get("awayTeam") or {}).get("name") or "").strip()
+
+                    if not utc_date or not home or not away:
+                        continue
+
+                    dt_local = datetime.fromisoformat(utc_date.replace("Z", "+00:00")).astimezone(TZ)
+                    if not (start <= dt_local <= end):
+                        continue
+
+                    out.append({
+                        "id": item.get("id"),
+                        "match": f"{home} vs {away}",
+                        "league": league_name,
+                        "home_team": home,
+                        "away_team": away,
+                        "dt_local": dt_local,
+                        "source": "football_data",
+                    })
+                except Exception:
                     continue
 
-                dt_local = datetime.fromisoformat(utc_date.replace("Z", "+00:00")).astimezone(TZ)
-                if not (start <= dt_local <= end):
-                    continue
-
-                out.append({
-                    "id": item.get("id"),
-                    "match": f"{home} vs {away}",
-                    "league": league_name,
-                    "home_team": home,
-                    "away_team": away,
-                    "dt_local": dt_local,
-                    "source": "football_data",
-                })
-            except Exception:
-                continue
-
-    out.sort(key=lambda x: x["dt_local"])
-    return out
+        clear_api_cooldown("football_data")
+        out.sort(key=lambda x: x["dt_local"])
+        return out
+    except Exception as e:
+        set_api_cooldown("football_data", parse_requests_error(e))
+        return []
 
 # =========================================================
-# MERGE 3 APIs - REAL ONLY
+# MERGE / PRIORITY / DEDUP
 # =========================================================
+
+def source_priority(source: str) -> int:
+    try:
+        return API_PRIORITY.index(source)
+    except ValueError:
+        return 999
 
 def get_real_matches() -> List[Dict[str, Any]]:
-    sportsdb_matches = get_sportsdb_matches()
-    api_football_matches = get_api_football_matches()
-    football_data_matches = get_football_data_matches()
+    # consulta todas, pero con cooldown automático
+    matches_by_source = {
+        "sportsdb": get_sportsdb_matches(),
+        "football_data": get_football_data_matches(),
+        "api_football": get_api_football_matches(),
+    }
 
-    combined = sportsdb_matches + api_football_matches + football_data_matches
+    combined: List[Dict[str, Any]] = []
+    for src in API_PRIORITY:
+        combined.extend(matches_by_source.get(src, []))
 
-    seen = set()
-    unique = []
+    # deduplicación priorizando por fuente
+    dedup: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
 
     for m in combined:
         date_key = m["dt_local"].strftime("%Y-%m-%d %H:%M")
@@ -439,11 +525,15 @@ def get_real_matches() -> List[Dict[str, Any]]:
             date_key,
         )
 
-        if key in seen:
+        if key not in dedup:
+            dedup[key] = m
             continue
-        seen.add(key)
-        unique.append(m)
 
+        old = dedup[key]
+        if source_priority(m["source"]) < source_priority(old["source"]):
+            dedup[key] = m
+
+    unique = list(dedup.values())
     unique.sort(key=lambda x: x["dt_local"])
     return unique[:MAX_PICKS]
 
@@ -677,7 +767,6 @@ def build_payload() -> Dict[str, Any]:
     history = merge_today_history(history, picks)
     write_json(HISTORY_FILE, history)
     write_json(CACHE_FILE, payload)
-
     return payload
 
 def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
@@ -692,7 +781,7 @@ def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"ok": True, "msg": "API funcionando con 3 APIs reales, sin fallback"}
+    return {"ok": True, "msg": "API funcionando con 3 APIs reales, cooldown automático y sin fallback"}
 
 @app.get("/test")
 def test():
@@ -702,16 +791,18 @@ def test():
 def test_api():
     try:
         sportsdb_matches = get_sportsdb_matches()
-        api_football_matches = get_api_football_matches()
         football_data_matches = get_football_data_matches()
+        api_football_matches = get_api_football_matches()
         merged = get_real_matches()
+        state = load_api_state()
 
         return {
             "ok": True,
             "sportsdb_count": len(sportsdb_matches),
-            "api_football_count": len(api_football_matches),
             "football_data_count": len(football_data_matches),
+            "api_football_count": len(api_football_matches),
             "final_count": len(merged),
+            "api_state": state,
             "matches": [
                 {
                     "match": m["match"],
