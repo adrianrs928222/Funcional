@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
+import ramdom
 import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -712,14 +713,9 @@ def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
     band = odds_band(odds)
     cards = predict_cards(league, home_strength, away_strength, home, away)
 
-    explanation = (
-        f"{league}: {home} vs {away}. "
-        f"Ganador estimado: {winner}. "
-        f"Proyección ofensiva aproximada: {home_xg:.2f} - {away_xg:.2f} xG. "
-        f"BTTS: {btts}. Over 2.5: {over}. "
-        f"Tarjetas previstas: {home} {cards[home]} / {away} {cards[away]}. "
-        f"Pick principal: {best['pick']}."
-    )
+  explanation = tipster_explanation(
+    best, home, away, winner, btts, over, cards
+)
 
     return {
         "id": match["id"],
