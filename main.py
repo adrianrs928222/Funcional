@@ -34,29 +34,40 @@ API_STATE_FILE = "api_state.json"
 LOOKAHEAD_HOURS = 168
 CACHE_REFRESH_MINUTES = 15
 MAX_PICKS = 20
-MAX_HISTORY_DAYS = 10
+MAX_HISTORY_DAYS = 14
 API_COOLDOWN_MINUTES = 10
 MIN_CONFIDENCE = 68
 
 API_PRIORITY = ["api_football", "football_data", "allsports", "sportsdb"]
 
+# =========================================================
+# LIGAS
+# =========================================================
+
+# TheSportsDB: verificado
 SPORTSDB_LEAGUES = {
     "4328": "LaLiga",
     "4400": "Segunda División",
     "4480": "Champions League",
 }
 
+# API-Football
+# Mantengo las que ya usabas. Si luego quieres activar Segunda aquí,
+# añade el ID exacto de tu panel.
 API_FOOTBALL_LEAGUES = {
     140: "LaLiga",
     2: "Champions League",
 }
 
+# Football-Data: verificado
 FOOTBALL_DATA_LEAGUES = {
     "PD": "LaLiga",
     "SD": "Segunda División",
     "CL": "Champions League",
 }
 
+# AllSports
+# Mantengo las que ya usabas.
 ALLSPORTS_LEAGUES = {
     302: "LaLiga",
     3: "Champions League",
@@ -65,6 +76,7 @@ ALLSPORTS_LEAGUES = {
 SEASON_CANDIDATES_SPORTSDB = ["2025-2026", "2024-2025"]
 
 TEAM_RATINGS = {
+    # LaLiga
     "Real Madrid": 93,
     "Real Madrid CF": 93,
     "Barcelona": 91,
@@ -154,6 +166,7 @@ TEAM_RATINGS = {
     "Liverpool FC": 91,
     "Bayern Munich": 92,
     "FC Bayern München": 92,
+    "FC Bayern Munchen": 92,
     "Borussia Dortmund": 86,
     "Paris Saint Germain": 91,
     "Paris SG": 91,
@@ -897,6 +910,165 @@ def group_picks(picks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     }
 
 # =========================================================
+# RESULT EVALUATION / HISTORY AUTO-UPDATE
+# =========================================================
+
+def evaluate_pick_result(pick: Dict[str, Any], home_goals: int, away_goals: int) -> str:
+    pick_type = pick.get("pick_type")
+    selected_pick = pick.get("pick", "")
+
+    if pick_type == "winner":
+        if home_goals > away_goals and selected_pick == f"Gana {pick.get('home_team')}":
+            return "won"
+        if away_goals > home_goals and selected_pick == f"Gana {pick.get('away_team')}":
+            return "won"
+        return "lost"
+
+    if pick_type == "btts_yes":
+        return "won" if home_goals > 0 and away_goals > 0 else "lost"
+
+    if pick_type == "over_2_5":
+        return "won" if (home_goals + away_goals) > 2 else "lost"
+
+    return "pending"
+
+
+def get_finished_scores_sportsdb() -> List[Dict[str, Any]]:
+    results = []
+    try:
+        for league_id, league_name in SPORTSDB_LEAGUES.items():
+            events: List[Dict[str, Any]] = []
+
+            for season in SEASON_CANDIDATES_SPORTSDB:
+                try:
+                    data = sportsdb_get(f"/eventsseason.php?id={league_id}&s={season}")
+                    season_events = data.get("events") or []
+                    if season_events:
+                        events.extend(season_events)
+                        break
+                except Exception:
+                    pass
+
+            for ev in events:
+                home = (ev.get("strHomeTeam") or "").strip()
+                away = (ev.get("strAwayTeam") or "").strip()
+                status = (ev.get("strStatus") or "").lower()
+                home_score = ev.get("intHomeScore")
+                away_score = ev.get("intAwayScore")
+
+                if not home or not away:
+                    continue
+                if home_score is None or away_score is None:
+                    continue
+
+                if status and all(x not in status for x in ["match finished", "ft", "after pen", "aet"]):
+                    continue
+
+                try:
+                    dt_local = parse_sportsdb_datetime(ev.get("dateEvent"), ev.get("strTime"))
+                except Exception:
+                    continue
+
+                results.append({
+                    "home_team": home,
+                    "away_team": away,
+                    "league": league_name,
+                    "kickoff_iso": dt_local.isoformat(),
+                    "home_goals": int(home_score),
+                    "away_goals": int(away_score),
+                    "score_line": f"{home_score}-{away_score}",
+                })
+    except Exception:
+        pass
+
+    return results
+
+
+def get_finished_scores_football_data() -> List[Dict[str, Any]]:
+    results = []
+    try:
+        start_date = (now_local() - timedelta(days=10)).date().isoformat()
+        end_date = now_local().date().isoformat()
+
+        for code, league_name in FOOTBALL_DATA_LEAGUES.items():
+            data = football_data_get(
+                f"/competitions/{code}/matches",
+                {"dateFrom": start_date, "dateTo": end_date},
+            )
+
+            for item in data.get("matches") or []:
+                status = (item.get("status") or "").upper()
+                if status not in ["FINISHED", "AWARDED"]:
+                    continue
+
+                home = ((item.get("homeTeam") or {}).get("name") or "").strip()
+                away = ((item.get("awayTeam") or {}).get("name") or "").strip()
+                full_time = ((item.get("score") or {}).get("fullTime") or {})
+                home_goals = full_time.get("home")
+                away_goals = full_time.get("away")
+
+                if not home or not away or home_goals is None or away_goals is None:
+                    continue
+
+                try:
+                    dt_local = datetime.fromisoformat(item["utcDate"].replace("Z", "+00:00")).astimezone(TZ)
+                except Exception:
+                    continue
+
+                results.append({
+                    "home_team": home,
+                    "away_team": away,
+                    "league": league_name,
+                    "kickoff_iso": dt_local.isoformat(),
+                    "home_goals": int(home_goals),
+                    "away_goals": int(away_goals),
+                    "score_line": f"{home_goals}-{away_goals}",
+                })
+    except Exception:
+        pass
+
+    return results
+
+
+def update_history_finished_matches(history: Dict[str, Any]) -> Dict[str, Any]:
+    finished_results = get_finished_scores_football_data() + get_finished_scores_sportsdb()
+
+    result_index = {}
+    for r in finished_results:
+        key = (
+            normalize_text(r["home_team"]),
+            normalize_text(r["away_team"]),
+            normalize_text(r["league"]),
+            r["kickoff_iso"],
+        )
+        result_index[key] = r
+
+    for _, day_data in history.get("days", {}).items():
+        for pick in day_data.get("picks", []):
+            if pick.get("status") in ["won", "lost"]:
+                continue
+
+            key = (
+                normalize_text(pick.get("home_team")),
+                normalize_text(pick.get("away_team")),
+                normalize_text(pick.get("league")),
+                pick.get("kickoff_iso"),
+            )
+
+            result = result_index.get(key)
+            if not result:
+                continue
+
+            pick["score_line"] = result["score_line"]
+            pick["status"] = evaluate_pick_result(
+                pick,
+                result["home_goals"],
+                result["away_goals"],
+            )
+
+    return refresh_history_stats(history)
+
+# =========================================================
 # HISTORY
 # =========================================================
 
@@ -922,7 +1094,42 @@ def trim_history(history: Dict[str, Any]) -> Dict[str, Any]:
 
 def merge_today_history(history: Dict[str, Any], picks: List[Dict[str, Any]]) -> Dict[str, Any]:
     history.setdefault("days", {})
-    history["days"][today_key()] = {"picks": picks}
+    day = today_key()
+
+    existing_day = history["days"].get(day, {"picks": []})
+    existing_picks = existing_day.get("picks", [])
+
+    existing_index = {}
+    for p in existing_picks:
+        key = (
+            normalize_text(p.get("home_team")),
+            normalize_text(p.get("away_team")),
+            normalize_text(p.get("league")),
+            p.get("kickoff_iso"),
+        )
+        existing_index[key] = p
+
+    for p in picks:
+        key = (
+            normalize_text(p.get("home_team")),
+            normalize_text(p.get("away_team")),
+            normalize_text(p.get("league")),
+            p.get("kickoff_iso"),
+        )
+
+        if key not in existing_index:
+            existing_picks.append(p)
+        else:
+            old = existing_index[key]
+            old["pick"] = p.get("pick", old.get("pick"))
+            old["pick_type"] = p.get("pick_type", old.get("pick_type"))
+            old["confidence"] = p.get("confidence", old.get("confidence"))
+            old["odds_estimate"] = p.get("odds_estimate", old.get("odds_estimate"))
+            old["odds_band"] = p.get("odds_band", old.get("odds_band"))
+            old["tipster_explanation"] = p.get("tipster_explanation", old.get("tipster_explanation"))
+            old["source"] = p.get("source", old.get("source"))
+
+    history["days"][day] = {"picks": existing_picks}
     history = refresh_history_stats(history)
     history = trim_history(history)
     return history
@@ -944,7 +1151,10 @@ def history_to_frontend(history: Dict[str, Any]) -> Dict[str, Any]:
 # =========================================================
 
 def build_payload() -> Dict[str, Any]:
-    picks = build_picks()
+    try:
+        picks = build_picks()
+    except Exception:
+        picks = []
 
     payload = {
         "generated_at": now_local().isoformat(),
@@ -952,14 +1162,27 @@ def build_payload() -> Dict[str, Any]:
         "lookahead_hours": LOOKAHEAD_HOURS,
         "count": len(picks),
         "picks": picks,
-        "combo_of_day": build_combo(picks),
-        "groups": group_picks(picks),
+        "combo_of_day": build_combo(picks) if picks else {},
+        "groups": group_picks(picks) if picks else {"normal": [], "media": [], "alta": []},
     }
 
     history = read_json(HISTORY_FILE)
-    history = merge_today_history(history, picks)
-    write_json(HISTORY_FILE, history)
-    write_json(CACHE_FILE, payload)
+
+    if picks:
+        history = merge_today_history(history, picks)
+
+    history = update_history_finished_matches(history)
+
+    try:
+        write_json(HISTORY_FILE, history)
+    except Exception:
+        pass
+
+    try:
+        write_json(CACHE_FILE, payload)
+    except Exception:
+        pass
+
     return payload
 
 
@@ -1023,8 +1246,10 @@ def picks(force_refresh: bool = Query(False)) -> Dict[str, Any]:
     try:
         return get_cached_or_refresh(force_refresh=force_refresh)
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        cache = read_json(CACHE_FILE)
+        if cache:
+            return cache
+
         return {
             "error": True,
             "message": str(e),
@@ -1039,6 +1264,7 @@ def picks(force_refresh: bool = Query(False)) -> Dict[str, Any]:
 def history() -> Dict[str, Any]:
     try:
         raw = read_json(HISTORY_FILE)
+        raw = update_history_finished_matches(raw)
         raw = refresh_history_stats(raw)
         raw = trim_history(raw)
         write_json(HISTORY_FILE, raw)
