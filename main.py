@@ -42,6 +42,7 @@ API_PRIORITY = ["api_football", "football_data", "allsports", "sportsdb"]
 
 SPORTSDB_LEAGUES = {
     "4328": "LaLiga",
+    "4400": "Segunda División",
     "4480": "Champions League",
 }
 
@@ -52,6 +53,7 @@ API_FOOTBALL_LEAGUES = {
 
 FOOTBALL_DATA_LEAGUES = {
     "PD": "LaLiga",
+    "SD": "Segunda División",
     "CL": "Champions League",
 }
 
@@ -96,6 +98,54 @@ TEAM_RATINGS = {
     "UD Las Palmas": 72,
     "Alaves": 73,
     "Deportivo Alavés": 73,
+
+    # Segunda División
+    "Almería": 78,
+    "UD Almería": 78,
+    "Granada": 77,
+    "Granada CF": 77,
+    "Cádiz": 76,
+    "Cadiz": 76,
+    "Cádiz CF": 76,
+    "Levante": 76,
+    "Levante UD": 76,
+    "Real Oviedo": 74,
+    "Real Zaragoza": 73,
+    "Sporting Gijón": 73,
+    "Sporting Gijon": 73,
+    "Real Sporting": 73,
+    "Eibar": 74,
+    "SD Eibar": 74,
+    "Elche": 75,
+    "Elche CF": 75,
+    "Racing Santander": 73,
+    "Racing de Santander": 73,
+    "Tenerife": 71,
+    "CD Tenerife": 71,
+    "Huesca": 71,
+    "SD Huesca": 71,
+    "Burgos": 71,
+    "Burgos CF": 71,
+    "Albacete": 71,
+    "Albacete Balompié": 71,
+    "Castellón": 70,
+    "Castellon": 70,
+    "CD Castellón": 70,
+    "CD Castellon": 70,
+    "Málaga": 72,
+    "Malaga": 72,
+    "Málaga CF": 72,
+    "Malaga CF": 72,
+    "Córdoba": 70,
+    "Cordoba": 70,
+    "Córdoba CF": 70,
+    "Cordoba CF": 70,
+    "Deportivo La Coruña": 72,
+    "Deportivo de La Coruña": 72,
+    "Deportivo La Coruna": 72,
+    "Deportivo de La Coruna": 72,
+
+    # Champions / top europeos
     "Manchester City": 94,
     "Manchester City FC": 94,
     "Arsenal": 91,
@@ -679,6 +729,7 @@ def tipster_explanation(best: Dict[str, Any], home: str, away: str, winner: str,
 def predict_cards(league: str, home_strength: float, away_strength: float, home: str, away: str) -> Dict[str, int]:
     base_cards = {
         "LaLiga": 5,
+        "Segunda División": 6,
         "Champions League": 4,
     }
     total = base_cards.get(league, 5)
@@ -721,6 +772,9 @@ def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
 
     home_strength = stable_team_rating(home) + 3.2
     away_strength = stable_team_rating(away)
+
+    if league == "Segunda División":
+        home_strength -= 1.0
 
     diff = home_strength - away_strength
     abs_diff = abs(diff)
@@ -923,7 +977,7 @@ def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
 def root() -> Dict[str, Any]:
     return {
         "ok": True,
-        "msg": "API funcionando con 4 APIs reales, premium, sin fallback"
+        "msg": "API funcionando con LaLiga, Segunda División y Champions"
     }
 
 
@@ -957,7 +1011,7 @@ def test_api() -> Dict[str, Any]:
                     "time_local": m["dt_local"].strftime("%d/%m %H:%M"),
                     "source": m["source"],
                 }
-                for m in merged[:10]
+                for m in merged[:15]
             ],
         }
     except Exception as e:
