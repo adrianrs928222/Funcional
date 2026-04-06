@@ -1,10 +1,10 @@
 import json
 import os
+import random
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytz
-import ramdom
 import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,29 +38,23 @@ MAX_HISTORY_DAYS = 10
 API_COOLDOWN_MINUTES = 10
 MIN_CONFIDENCE = 68
 
-# prioridad de fuente al deduplicar
 API_PRIORITY = ["api_football", "football_data", "allsports", "sportsdb"]
 
-# TheSportsDB
 SPORTSDB_LEAGUES = {
     "4328": "LaLiga",
     "4480": "Champions League",
 }
 
-# API-Football
 API_FOOTBALL_LEAGUES = {
     140: "LaLiga",
     2: "Champions League",
 }
 
-# Football-Data.org
 FOOTBALL_DATA_LEAGUES = {
     "PD": "LaLiga",
     "CL": "Champions League",
 }
 
-# AllSportsAPI
-# IDs orientativos usados habitualmente
 ALLSPORTS_LEAGUES = {
     302: "LaLiga",
     3: "Champions League",
@@ -102,7 +96,6 @@ TEAM_RATINGS = {
     "UD Las Palmas": 72,
     "Alaves": 73,
     "Deportivo Alavés": 73,
-
     "Manchester City": 94,
     "Manchester City FC": 94,
     "Arsenal": 91,
@@ -155,6 +148,7 @@ def read_json(path: str) -> Any:
     except Exception:
         return {}
 
+
 def write_json(path: str, data: Any) -> None:
     tmp = f"{path}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -168,11 +162,14 @@ def write_json(path: str, data: Any) -> None:
 def now_local() -> datetime:
     return datetime.now(TZ)
 
+
 def today_key() -> str:
     return now_local().strftime("%Y-%m-%d")
 
+
 def normalize_text(v: Optional[str]) -> str:
     return (v or "").strip().lower()
+
 
 def cache_is_valid(cache: Dict[str, Any]) -> bool:
     if not cache:
@@ -193,21 +190,25 @@ def cache_is_valid(cache: Dict[str, Any]) -> bool:
     age = now_local() - dt.astimezone(TZ)
     return age < timedelta(minutes=CACHE_REFRESH_MINUTES)
 
+
 def stable_team_rating(team_name: str) -> float:
     if team_name in TEAM_RATINGS:
         return TEAM_RATINGS[team_name]
     h = abs(hash(team_name)) % 1000
     return 68 + (h / 1000) * 14
 
+
 def current_api_football_season() -> int:
     now = now_local()
     return now.year if now.month >= 7 else now.year - 1
+
 
 def parse_requests_error(e: Exception) -> str:
     text = str(e)
     if "429" in text:
         return "rate_limit"
     return text[:300]
+
 
 def source_priority(source: str) -> int:
     try:
@@ -225,8 +226,10 @@ def load_api_state() -> Dict[str, Any]:
         state.setdefault(name, {})
     return state
 
+
 def save_api_state(state: Dict[str, Any]) -> None:
     write_json(API_STATE_FILE, state)
+
 
 def set_api_cooldown(api_name: str, reason: str) -> None:
     state = load_api_state()
@@ -236,12 +239,14 @@ def set_api_cooldown(api_name: str, reason: str) -> None:
     state[api_name]["last_error"] = reason
     save_api_state(state)
 
+
 def clear_api_cooldown(api_name: str) -> None:
     state = load_api_state()
     state.setdefault(api_name, {})
     state[api_name]["cooldown_until"] = None
     state[api_name]["last_error"] = None
     save_api_state(state)
+
 
 def api_is_available(api_name: str) -> bool:
     state = load_api_state()
@@ -266,6 +271,7 @@ def sportsdb_get(path: str) -> Dict[str, Any]:
     r.raise_for_status()
     return r.json()
 
+
 def parse_sportsdb_datetime(date_str: Optional[str], time_str: Optional[str]) -> datetime:
     date_str = (date_str or "").strip()
     time_str = (time_str or "00:00:00").strip().replace("Z", "")
@@ -273,6 +279,7 @@ def parse_sportsdb_datetime(date_str: Optional[str], time_str: Optional[str]) ->
         raise ValueError("Missing dateEvent")
     dt_utc = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.UTC)
     return dt_utc.astimezone(TZ)
+
 
 def extract_home_away_sportsdb(event: Dict[str, Any]) -> Dict[str, str]:
     home = (event.get("strHomeTeam") or "").strip()
@@ -290,6 +297,7 @@ def extract_home_away_sportsdb(event: Dict[str, Any]) -> Dict[str, str]:
         return {"home": a.strip(), "away": b.strip()}
 
     raise ValueError("No se pudo extraer home/away")
+
 
 def get_sportsdb_matches() -> List[Dict[str, Any]]:
     if not api_is_available("sportsdb"):
@@ -370,6 +378,7 @@ def api_football_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict
     r.raise_for_status()
     return r.json()
 
+
 def get_api_football_matches() -> List[Dict[str, Any]]:
     if not api_is_available("api_football"):
         return []
@@ -447,6 +456,7 @@ def football_data_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dic
     r.raise_for_status()
     return r.json()
 
+
 def get_football_data_matches() -> List[Dict[str, Any]]:
     if not api_is_available("football_data"):
         return []
@@ -515,6 +525,7 @@ def allsports_get(params: Dict[str, Any]) -> Dict[str, Any]:
     r.raise_for_status()
     return r.json()
 
+
 def parse_allsports_datetime(event_date: Optional[str], event_time: Optional[str]) -> datetime:
     date_str = (event_date or "").strip()
     time_str = (event_time or "00:00").strip()
@@ -528,6 +539,7 @@ def parse_allsports_datetime(event_date: Optional[str], event_time: Optional[str
         dt_naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
 
     return TZ.localize(dt_naive)
+
 
 def get_allsports_matches() -> List[Dict[str, Any]]:
     if not api_is_available("allsports"):
@@ -624,6 +636,43 @@ def get_real_matches() -> List[Dict[str, Any]]:
     return unique[:MAX_PICKS]
 
 # =========================================================
+# TIPSTER EXPLANATION
+# =========================================================
+
+def tipster_explanation(best: Dict[str, Any], home: str, away: str, winner: str, btts: str, over: str, cards: Dict[str, int]) -> str:
+    winner_texts = [
+        f"Me quedo con {best['pick']}. {winner} llega con mejores argumentos para sacar el partido adelante y, en este tipo de escenarios, suele responder bien cuando tiene que marcar diferencias. El rival puede competir por momentos, pero veo más solidez general del lado de {winner}.",
+        f"El valor está en {best['pick']}. {winner} parte un escalón por encima en este cruce y debería imponer su ritmo en los momentos importantes. No espero un trámite, pero sí un partido donde {winner} tenga más recursos para decidirlo.",
+        f"Para este encuentro, me posiciono con {best['pick']}. {winner} transmite mejores sensaciones competitivas y tiene más capacidad para castigar errores. Si el partido sigue un guion lógico, debería acabar imponiendo su mayor peso."
+    ]
+
+    btts_texts = [
+        f"Me gusta el mercado de ambos marcan. Espero un partido abierto, con llegadas en ambas áreas y dos equipos con argumentos ofensivos suficientes para encontrar portería. No parece un duelo de control absoluto, sino uno con alternativas.",
+        f"El ambos marcan tiene sentido aquí. Ninguno de los dos transmite demasiada seguridad atrás y ambos tienen capacidad para generar ocasiones. En un escenario de ida y vuelta, lo normal es ver gol en las dos porterías.",
+        f"Veo valor en el ambos marcan. El contexto del partido invita a pensar en un intercambio de golpes, con espacios, ritmo y varias situaciones claras de ataque para ambos conjuntos."
+    ]
+
+    over_texts = [
+        f"Me gusta la línea de más de 2.5 goles. El partido apunta a ritmo alto, fases abiertas y suficientes llegadas como para pensar en un marcador movido. Si se abre pronto, el encuentro puede romperse del todo.",
+        f"Espero un partido con goles. No es un duelo que invite a pensar en especulación continua, sino más bien en un desarrollo con ocasiones y momentos de transición que favorecen superar la línea.",
+        f"El over 2.5 tiene bastante sentido por el perfil del cruce. Ambos equipos tienen recursos para hacer daño y el partido puede entrar rápido en una dinámica abierta."
+    ]
+
+    cards_texts = [
+        f"En el apartado disciplinario, espero un partido intenso. Es un tipo de encuentro donde las disputas, las faltas tácticas y las interrupciones pueden tener bastante peso, así que el escenario favorece ver varias tarjetas.",
+        f"Partido propenso a tarjetas. El contexto competitivo, la tensión del cruce y la necesidad de cortar transiciones suelen empujar este tipo de encuentros hacia un listón alto de amonestaciones.",
+        f"Espero un choque físico y con bastante fricción. No parece un partido limpio, sino uno con duelos constantes y situaciones que pueden terminar fácilmente en tarjetas."
+    ]
+
+    if best["pick_type"] == "winner":
+        return random.choice(winner_texts)
+    if best["pick_type"] == "btts_yes":
+        return random.choice(btts_texts)
+    if best["pick_type"] == "over_2_5":
+        return random.choice(over_texts)
+    return random.choice(cards_texts)
+
+# =========================================================
 # PICK MODEL
 # =========================================================
 
@@ -646,6 +695,7 @@ def predict_cards(league: str, home_strength: float, away_strength: float, home:
 
     return {home: int(home_cards), away: int(away_cards)}
 
+
 def estimate_odds_from_confidence(confidence: int, pick_type: str) -> float:
     if pick_type == "winner":
         base = 2.30 - (confidence - 60) * 0.024
@@ -655,12 +705,14 @@ def estimate_odds_from_confidence(confidence: int, pick_type: str) -> float:
         base = 2.48 - (confidence - 60) * 0.021
     return round(max(1.42, min(base, 2.60)), 2)
 
+
 def odds_band(odds: float) -> str:
     if odds <= 1.70:
         return "normal"
     if odds <= 2.05:
         return "media"
     return "alta"
+
 
 def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
     home = match["home_team"]
@@ -681,7 +733,7 @@ def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
     btts = "Sí" if home_xg >= 1.0 and away_xg >= 0.9 and abs_diff < 7.5 else "No"
     over = "Sí" if total_xg >= 2.60 else "No"
 
-    options = []
+    options: List[Dict[str, Any]] = []
 
     winner_conf = int(max(68, min(89, 69 + min(abs_diff * 1.7, 18))))
     options.append({
@@ -713,9 +765,9 @@ def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
     band = odds_band(odds)
     cards = predict_cards(league, home_strength, away_strength, home, away)
 
-  explanation = tipster_explanation(
-    best, home, away, winner, btts, over, cards
-)
+    explanation = tipster_explanation(
+        best, home, away, winner, btts, over, cards
+    )
 
     return {
         "id": match["id"],
@@ -740,6 +792,7 @@ def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
         "source": match.get("source", "unknown"),
     }
 
+
 def build_picks() -> List[Dict[str, Any]]:
     matches = get_real_matches()
     picks = [build_pick(m) for m in matches]
@@ -747,9 +800,10 @@ def build_picks() -> List[Dict[str, Any]]:
     picks.sort(key=lambda x: (x["confidence"], x["odds_estimate"]), reverse=True)
     return picks[:MAX_PICKS]
 
+
 def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
     eligible = [p for p in picks if p["confidence"] >= 80]
-    combo = []
+    combo: List[Dict[str, Any]] = []
     used = set()
 
     for p in eligible:
@@ -780,6 +834,7 @@ def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
         "picks": combo,
     }
 
+
 def group_picks(picks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     return {
         "normal": [p for p in picks if p["odds_band"] == "normal"],
@@ -802,6 +857,7 @@ def refresh_history_stats(history: Dict[str, Any]) -> Dict[str, Any]:
         }
     return history
 
+
 def trim_history(history: Dict[str, Any]) -> Dict[str, Any]:
     days_obj = history.get("days", {})
     sorted_keys = sorted(days_obj.keys(), reverse=True)
@@ -809,12 +865,14 @@ def trim_history(history: Dict[str, Any]) -> Dict[str, Any]:
     history["days"] = {k: v for k, v in days_obj.items() if k in keep}
     return history
 
+
 def merge_today_history(history: Dict[str, Any], picks: List[Dict[str, Any]]) -> Dict[str, Any]:
     history.setdefault("days", {})
     history["days"][today_key()] = {"picks": picks}
     history = refresh_history_stats(history)
     history = trim_history(history)
     return history
+
 
 def history_to_frontend(history: Dict[str, Any]) -> Dict[str, Any]:
     days_obj = history.get("days", {})
@@ -850,6 +908,7 @@ def build_payload() -> Dict[str, Any]:
     write_json(CACHE_FILE, payload)
     return payload
 
+
 def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
     cache = read_json(CACHE_FILE)
     if not force_refresh and cache_is_valid(cache):
@@ -861,18 +920,20 @@ def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
 # =========================================================
 
 @app.get("/")
-def root():
+def root() -> Dict[str, Any]:
     return {
         "ok": True,
         "msg": "API funcionando con 4 APIs reales, premium, sin fallback"
     }
 
+
 @app.get("/test")
-def test():
+def test() -> Dict[str, Any]:
     return {"ok": True}
 
+
 @app.get("/test-api")
-def test_api():
+def test_api() -> Dict[str, Any]:
     try:
         sportsdb_matches = get_sportsdb_matches()
         football_data_matches = get_football_data_matches()
@@ -902,8 +963,9 @@ def test_api():
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
+
 @app.get("/api/picks")
-def picks(force_refresh: bool = Query(False)):
+def picks(force_refresh: bool = Query(False)) -> Dict[str, Any]:
     try:
         return get_cached_or_refresh(force_refresh=force_refresh)
     except Exception as e:
@@ -918,8 +980,9 @@ def picks(force_refresh: bool = Query(False)):
             "groups": {"normal": [], "media": [], "alta": []},
         }
 
+
 @app.get("/api/history")
-def history():
+def history() -> Dict[str, Any]:
     try:
         raw = read_json(HISTORY_FILE)
         raw = refresh_history_stats(raw)
@@ -928,6 +991,7 @@ def history():
         return history_to_frontend(raw)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn
