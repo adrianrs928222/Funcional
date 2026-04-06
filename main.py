@@ -23,6 +23,9 @@ API_FOOTBALL_BASE_URL = "https://v3.football.api-sports.io"
 FOOTBALL_DATA_API_KEY = os.getenv("FOOTBALL_DATA_API_KEY", "").strip()
 FOOTBALL_DATA_BASE_URL = "https://api.football-data.org/v4"
 
+ALLSPORTS_API_KEY = os.getenv("ALLSPORTS_API_KEY", "").strip()
+ALLSPORTS_BASE_URL = "https://apiv2.allsportsapi.com/football/"
+
 CACHE_FILE = "cache.json"
 HISTORY_FILE = "history.json"
 API_STATE_FILE = "api_state.json"
@@ -31,12 +34,10 @@ LOOKAHEAD_HOURS = 96
 CACHE_REFRESH_MINUTES = 15
 MAX_PICKS = 12
 MAX_HISTORY_DAYS = 10
-
-# cooldown si una API falla o devuelve rate limit
 API_COOLDOWN_MINUTES = 10
 
-# prioridad de uso
-API_PRIORITY = ["sportsdb", "football_data", "api_football"]
+# prioridad de fuente al deduplicar
+API_PRIORITY = ["api_football", "football_data", "allsports", "sportsdb"]
 
 # TheSportsDB
 SPORTSDB_LEAGUES = {
@@ -54,6 +55,15 @@ API_FOOTBALL_LEAGUES = {
 FOOTBALL_DATA_LEAGUES = {
     "PD": "LaLiga",
     "CL": "Champions League",
+}
+
+# AllSportsAPI
+# league ids frecuentes:
+# LaLiga = 302
+# Champions League = 3
+ALLSPORTS_LEAGUES = {
+    302: "LaLiga",
+    3: "Champions League",
 }
 
 SEASON_CANDIDATES_SPORTSDB = ["2025-2026", "2024-2025"]
@@ -118,6 +128,8 @@ TEAM_RATINGS = {
     "PSV Eindhoven": 85,
     "PSV": 85,
     "RB Leipzig": 84,
+    "Sporting CP": 83,
+    "Sporting Lisbon": 83,
 }
 
 app = FastAPI(title="Top Picks Pro")
@@ -131,7 +143,7 @@ app.add_middleware(
 )
 
 # =========================================================
-# FILE UTILS
+# FILE HELPERS
 # =========================================================
 
 def read_json(path: str) -> Any:
@@ -197,9 +209,8 @@ def current_api_football_season() -> int:
 
 def load_api_state() -> Dict[str, Any]:
     state = read_json(API_STATE_FILE)
-    state.setdefault("sportsdb", {})
-    state.setdefault("football_data", {})
-    state.setdefault("api_football", {})
+    for name in ["sportsdb", "football_data", "api_football", "allsports"]:
+        state.setdefault(name, {})
     return state
 
 def save_api_state(state: Dict[str, Any]) -> None:
@@ -240,23 +251,26 @@ def parse_requests_error(e: Exception) -> str:
         return "rate_limit"
     return text[:300]
 
+def source_priority(source: str) -> int:
+    try:
+        return API_PRIORITY.index(source)
+    except ValueError:
+        return 999
+
 # =========================================================
 # THESPORTSDB
 # =========================================================
 
 def sportsdb_get(path: str) -> Dict[str, Any]:
-    url = f"{SPORTSDB_BASE_URL}{path}"
-    r = requests.get(url, timeout=12)
+    r = requests.get(f"{SPORTSDB_BASE_URL}{path}", timeout=12)
     r.raise_for_status()
     return r.json()
 
 def parse_sportsdb_datetime(date_str: Optional[str], time_str: Optional[str]) -> datetime:
     date_str = (date_str or "").strip()
     time_str = (time_str or "00:00:00").strip().replace("Z", "")
-
     if not date_str:
         raise ValueError("Missing dateEvent")
-
     dt_utc = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.UTC)
     return dt_utc.astimezone(TZ)
 
@@ -268,11 +282,9 @@ def extract_home_away_sportsdb(event: Dict[str, Any]) -> Dict[str, str]:
         return {"home": home, "away": away}
 
     event_name = (event.get("strEvent") or "").strip()
-
     if " vs " in event_name:
         a, b = event_name.split(" vs ", 1)
         return {"home": a.strip(), "away": b.strip()}
-
     if " - " in event_name:
         a, b = event_name.split(" - ", 1)
         return {"home": a.strip(), "away": b.strip()}
@@ -349,7 +361,6 @@ def api_football_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict
         raise RuntimeError("Falta API_FOOTBALL_KEY")
 
     headers = {"x-apisports-key": API_FOOTBALL_KEY}
-
     r = requests.get(
         f"{API_FOOTBALL_BASE_URL}{path}",
         headers=headers,
@@ -388,7 +399,6 @@ def get_api_football_matches() -> List[Dict[str, Any]]:
                 try:
                     fixture = item.get("fixture") or {}
                     teams = item.get("teams") or {}
-
                     home = (teams.get("home") or {}).get("name")
                     away = (teams.get("away") or {}).get("name")
                     date_str = fixture.get("date")
@@ -428,7 +438,6 @@ def football_data_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dic
         raise RuntimeError("Falta FOOTBALL_DATA_API_KEY")
 
     headers = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
-
     r = requests.get(
         f"{FOOTBALL_DATA_BASE_URL}{path}",
         headers=headers,
@@ -492,28 +501,107 @@ def get_football_data_matches() -> List[Dict[str, Any]]:
         return []
 
 # =========================================================
-# MERGE / PRIORITY / DEDUP
+# ALLSPORTSAPI
 # =========================================================
 
-def source_priority(source: str) -> int:
+def allsports_get(params: Dict[str, Any]) -> Dict[str, Any]:
+    if not ALLSPORTS_API_KEY:
+        raise RuntimeError("Falta ALLSPORTS_API_KEY")
+
+    base_params = {"APIkey": ALLSPORTS_API_KEY}
+    base_params.update(params)
+
+    r = requests.get(ALLSPORTS_BASE_URL, params=base_params, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+def parse_allsports_datetime(event_date: Optional[str], event_time: Optional[str]) -> datetime:
+    date_str = (event_date or "").strip()
+    time_str = (event_time or "00:00").strip()
+
+    if not date_str:
+        raise ValueError("Missing event_date")
+
+    # normalmente viene ya en hora local del feed
+    # lo tratamos como Europe/Madrid
+    if len(time_str) == 5:
+        dt_naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    else:
+        dt_naive = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
+
+    return TZ.localize(dt_naive)
+
+def get_allsports_matches() -> List[Dict[str, Any]]:
+    if not api_is_available("allsports"):
+        return []
+
+    start = now_local()
+    end = now_local() + timedelta(hours=LOOKAHEAD_HOURS)
+    start_date = start.date().isoformat()
+    end_date = end.date().isoformat()
+    out: List[Dict[str, Any]] = []
+
     try:
-        return API_PRIORITY.index(source)
-    except ValueError:
-        return 999
+        for league_id, league_name in ALLSPORTS_LEAGUES.items():
+            data = allsports_get(
+                {
+                    "met": "Fixtures",
+                    "leagueId": league_id,
+                    "from": start_date,
+                    "to": end_date,
+                }
+            )
+
+            items = data.get("result") or []
+            for item in items:
+                try:
+                    home = (item.get("event_home_team") or "").strip()
+                    away = (item.get("event_away_team") or "").strip()
+                    event_date = item.get("event_date")
+                    event_time = item.get("event_time")
+
+                    if not home or not away or not event_date:
+                        continue
+
+                    dt_local = parse_allsports_datetime(event_date, event_time)
+                    if not (start <= dt_local <= end):
+                        continue
+
+                    out.append({
+                        "id": item.get("event_key"),
+                        "match": f"{home} vs {away}",
+                        "league": league_name,
+                        "home_team": home,
+                        "away_team": away,
+                        "dt_local": dt_local,
+                        "source": "allsports",
+                    })
+                except Exception:
+                    continue
+
+        clear_api_cooldown("allsports")
+        out.sort(key=lambda x: x["dt_local"])
+        return out
+    except Exception as e:
+        set_api_cooldown("allsports", parse_requests_error(e))
+        return []
+
+# =========================================================
+# MERGE / DEDUP
+# =========================================================
 
 def get_real_matches() -> List[Dict[str, Any]]:
-    # consulta todas, pero con cooldown automático
     matches_by_source = {
-        "sportsdb": get_sportsdb_matches(),
-        "football_data": get_football_data_matches(),
         "api_football": get_api_football_matches(),
+        "football_data": get_football_data_matches(),
+        "allsports": get_allsports_matches(),
+        "sportsdb": get_sportsdb_matches(),
     }
 
     combined: List[Dict[str, Any]] = []
     for src in API_PRIORITY:
         combined.extend(matches_by_source.get(src, []))
 
-    # deduplicación priorizando por fuente
     dedup: Dict[Tuple[str, str, str, str], Dict[str, Any]] = {}
 
     for m in combined:
@@ -781,7 +869,7 @@ def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
 
 @app.get("/")
 def root():
-    return {"ok": True, "msg": "API funcionando con 3 APIs reales, cooldown automático y sin fallback"}
+    return {"ok": True, "msg": "API funcionando con 4 APIs reales, cooldown automático y sin fallback"}
 
 @app.get("/test")
 def test():
@@ -793,6 +881,7 @@ def test_api():
         sportsdb_matches = get_sportsdb_matches()
         football_data_matches = get_football_data_matches()
         api_football_matches = get_api_football_matches()
+        allsports_matches = get_allsports_matches()
         merged = get_real_matches()
         state = load_api_state()
 
@@ -801,6 +890,7 @@ def test_api():
             "sportsdb_count": len(sportsdb_matches),
             "football_data_count": len(football_data_matches),
             "api_football_count": len(api_football_matches),
+            "allsports_count": len(allsports_matches),
             "final_count": len(merged),
             "api_state": state,
             "matches": [
