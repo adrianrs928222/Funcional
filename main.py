@@ -25,10 +25,14 @@ app.add_middleware(
 )
 
 LOOKAHEAD_HOURS = 72
-MAX_MATCHES = 10
+MAX_MATCHES_PER_COMP = 12
+MAX_PICKS = 12
 
-LEAGUE_CODE = "PD"
-LEAGUE_NAME = "LaLiga"
+COMPETITIONS = {
+    "PD": "LaLiga",
+    "SD": "Segunda División",
+    "CL": "Champions League",
+}
 
 TEAM_RATINGS = {
     "Real Madrid CF": 93,
@@ -41,6 +45,33 @@ TEAM_RATINGS = {
     "Girona FC": 80,
     "Valencia CF": 77,
     "Sevilla FC": 78,
+
+    "RCD Espanyol de Barcelona": 77,
+    "Levante UD": 75,
+    "Real Zaragoza": 73,
+    "Real Sporting de Gijón": 73,
+    "Real Oviedo": 74,
+    "Elche CF": 75,
+    "CD Tenerife": 71,
+    "Cádiz CF": 75,
+    "SD Eibar": 74,
+    "Granada CF": 76,
+    "CD Castellón": 71,
+    "Real Sociedad B": 70,
+
+    "Manchester City FC": 94,
+    "Arsenal FC": 91,
+    "Liverpool FC": 91,
+    "FC Bayern München": 92,
+    "Borussia Dortmund": 86,
+    "Paris Saint-Germain FC": 91,
+    "FC Internazionale Milano": 90,
+    "Juventus FC": 86,
+    "AC Milan": 86,
+    "SSC Napoli": 84,
+    "SL Benfica": 84,
+    "FC Porto": 83,
+    "PSV": 85,
 }
 
 def now_local() -> datetime:
@@ -55,7 +86,7 @@ def api_get(path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         f"{BASE_URL}{path}",
         headers=headers,
         params=params,
-        timeout=10,
+        timeout=12,
     )
     r.raise_for_status()
     return r.json()
@@ -69,44 +100,54 @@ def stable_team_rating(team_name: str) -> float:
 def get_matches() -> List[Dict[str, Any]]:
     start = now_local()
     end = now_local() + timedelta(hours=LOOKAHEAD_HOURS)
-
     out: List[Dict[str, Any]] = []
 
-    data = api_get(
-        f"/competitions/{LEAGUE_CODE}/matches",
-        {
-            "dateFrom": start.date().isoformat(),
-            "dateTo": end.date().isoformat(),
-        },
-    )
-
-    matches = (data.get("matches") or [])[:MAX_MATCHES]
-
-    for m in matches:
+    for code, league_name in COMPETITIONS.items():
         try:
-            utc_date = m["utcDate"]
-            home = m["homeTeam"]["name"]
-            away = m["awayTeam"]["name"]
-            dt_local = parse_iso_to_local(utc_date)
-        except Exception:
+            data = api_get(
+                f"/competitions/{code}/matches",
+                {
+                    "dateFrom": start.date().isoformat(),
+                    "dateTo": end.date().isoformat(),
+                },
+            )
+            matches = data.get("matches") or []
+            matches = matches[:MAX_MATCHES_PER_COMP]
+        except Exception as e:
+            print(f"ERROR {code}: {e}")
             continue
 
-        if not (start <= dt_local <= end):
-            continue
+        for m in matches:
+            try:
+                utc_date = m["utcDate"]
+                home = m["homeTeam"]["name"]
+                away = m["awayTeam"]["name"]
+                dt_local = parse_iso_to_local(utc_date)
+            except Exception:
+                continue
 
-        out.append({
-            "id": m.get("id"),
-            "match": f"{home} vs {away}",
-            "league": LEAGUE_NAME,
-            "home_team": home,
-            "away_team": away,
-            "dt_local": dt_local,
-        })
+            if not (start <= dt_local <= end):
+                continue
 
+            out.append({
+                "id": m.get("id"),
+                "match": f"{home} vs {away}",
+                "league": league_name,
+                "home_team": home,
+                "away_team": away,
+                "dt_local": dt_local,
+            })
+
+    out.sort(key=lambda x: x["dt_local"])
     return out
 
-def predict_cards(home_strength: float, away_strength: float, home: str, away: str):
-    total = 5
+def predict_cards(league: str, home_strength: float, away_strength: float, home: str, away: str):
+    base_cards = {
+        "LaLiga": 5,
+        "Segunda División": 6,
+        "Champions League": 4,
+    }
+    total = base_cards.get(league, 5)
 
     if home_strength > away_strength:
         away_cards = min(total - 1, max(2, round(total * 0.58)))
@@ -142,6 +183,7 @@ def odds_band(odds: float) -> str:
 def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
     home = match["home_team"]
     away = match["away_team"]
+    league = match["league"]
 
     home_strength = stable_team_rating(home) + 3.2
     away_strength = stable_team_rating(away)
@@ -187,10 +229,10 @@ def build_pick(match: Dict[str, Any]) -> Dict[str, Any]:
 
     odds = estimate_odds_from_confidence(best["confidence"], best["pick_type"])
     band = odds_band(odds)
-    cards = predict_cards(home_strength, away_strength, home, away)
+    cards = predict_cards(league, home_strength, away_strength, home, away)
 
     explanation = (
-        f"{LEAGUE_NAME}: {home} vs {away}. "
+        f"{league}: {home} vs {away}. "
         f"Ganador estimado: {winner}. "
         f"Proyección ofensiva aproximada: {home_xg:.2f} - {away_xg:.2f} xG. "
         f"BTTS: {btts}. Over 2.5: {over}. "
@@ -224,7 +266,7 @@ def build_picks() -> List[Dict[str, Any]]:
     picks = [build_pick(m) for m in matches]
     picks = [p for p in picks if p["confidence"] >= 72]
     picks.sort(key=lambda x: (x["confidence"], x["odds_estimate"]), reverse=True)
-    return picks[:MAX_MATCHES]
+    return picks[:MAX_PICKS]
 
 def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
     eligible = [p for p in picks if p["confidence"] >= 80]
@@ -281,7 +323,7 @@ def test_api():
         return {
             "ok": True,
             "count": len(matches),
-            "matches": matches[:5],
+            "matches": matches[:10],
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
