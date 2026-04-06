@@ -44,30 +44,23 @@ API_PRIORITY = ["api_football", "football_data", "allsports", "sportsdb"]
 # LIGAS
 # =========================================================
 
-# TheSportsDB: verificado
 SPORTSDB_LEAGUES = {
     "4328": "LaLiga",
     "4400": "Segunda División",
     "4480": "Champions League",
 }
 
-# API-Football
-# Mantengo las que ya usabas. Si luego quieres activar Segunda aquí,
-# añade el ID exacto de tu panel.
 API_FOOTBALL_LEAGUES = {
     140: "LaLiga",
     2: "Champions League",
 }
 
-# Football-Data: verificado
 FOOTBALL_DATA_LEAGUES = {
     "PD": "LaLiga",
     "SD": "Segunda División",
     "CL": "Champions League",
 }
 
-# AllSports
-# Mantengo las que ya usabas.
 ALLSPORTS_LEAGUES = {
     302: "LaLiga",
     3: "Champions League",
@@ -904,9 +897,9 @@ def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def group_picks(picks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     return {
-        "normal": [p for p in picks if p["odds_band"] == "normal"],
-        "media": [p for p in picks if p["odds_band"] == "media"],
-        "alta": [p for p in picks if p["odds_band"] == "alta"],
+        "alta": [p for p in picks if p["confidence"] >= 80],
+        "media": [p for p in picks if 72 <= p["confidence"] < 80],
+        "intermedia": [p for p in picks if p["confidence"] < 72],
     }
 
 # =========================================================
@@ -1163,7 +1156,7 @@ def build_payload() -> Dict[str, Any]:
         "count": len(picks),
         "picks": picks,
         "combo_of_day": build_combo(picks) if picks else {},
-        "groups": group_picks(picks) if picks else {"normal": [], "media": [], "alta": []},
+        "groups": group_picks(picks) if picks else {"alta": [], "media": [], "intermedia": []},
     }
 
     history = read_json(HISTORY_FILE)
@@ -1256,7 +1249,7 @@ def picks(force_refresh: bool = Query(False)) -> Dict[str, Any]:
             "count": 0,
             "picks": [],
             "combo_of_day": {},
-            "groups": {"normal": [], "media": [], "alta": []},
+            "groups": {"alta": [], "media": [], "intermedia": []},
         }
 
 
