@@ -1034,3 +1034,699 @@ def get_real_matches() -> List[Dict[str, Any]]:
     unique = list(dedup.values())
     unique.sort(key=lambda x: x["dt_local"])
     return unique[:MAX_PICKS]
+# =========================================================
+# TIPSTER EXPLANATION
+# =========================================================
+
+def tipster_explanation(
+    best: Dict[str, Any],
+    home: str,
+    away: str,
+    winner: str,
+    btts: str,
+    over: str,
+    cards: Dict[str, int],
+    extra: Dict[str, Any],
+) -> str:
+    form_note = extra.get("form_note", "")
+    odds_note = extra.get("odds_note", "")
+
+    if best["pick_type"] == "winner":
+        return (
+            f"Me quedo con {best['pick']}. {winner} llega mejor posicionado para sacar el partido adelante, "
+            f"con un contexto más favorable en este cruce. {form_note} "
+            f"Espero que termine imponiendo su mayor solidez en los momentos importantes. {odds_note}"
+        ).strip()
+
+    if best["pick_type"] == "btts_yes":
+        return (
+            f"Veo valor en el ambos marcan. El partido invita a pensar en llegadas en ambas áreas y en un escenario "
+            f"con opciones reales para los dos equipos. {form_note} {odds_note}"
+        ).strip()
+
+    if best["pick_type"] == "over_2_5":
+        return (
+            f"Me gusta la línea de más de 2.5 goles. El perfil del encuentro apunta a fases abiertas, ritmo y "
+            f"ocasiones suficientes para superar la barrera de goles. {form_note} {odds_note}"
+        ).strip()
+
+    return (
+        f"Partido propenso a tarjetas. Espero tensión competitiva, bastante disputa y acciones tácticas que pueden "
+        f"elevar el número de amonestaciones. {form_note} {odds_note}"
+    ).strip()
+
+# =========================================================
+# PICK MODEL
+# =========================================================
+
+def predict_cards(league: str, home_strength: float, away_strength: float, home: str, away: str) -> Dict[str, int]:
+    base_cards = {
+        "LaLiga": 5,
+        "Segunda División": 6,
+        "Champions League": 4,
+    }
+    total = base_cards.get(league, 5)
+
+    if home_strength > away_strength:
+        away_cards = min(total - 1, max(2, round(total * 0.58)))
+        home_cards = total - away_cards
+    elif away_strength > home_strength:
+        home_cards = min(total - 1, max(2, round(total * 0.58)))
+        away_cards = total - home_cards
+    else:
+        home_cards = total // 2
+        away_cards = total - home_cards
+
+    return {home: int(home_cards), away: int(away_cards)}
+
+
+def implied_confidence_from_odds(decimal_odds: Optional[float]) -> Optional[int]:
+    if not decimal_odds or decimal_odds <= 1.0:
+        return None
+    prob = 100 / float(decimal_odds)
+    return int(round(max(1, min(prob, 99))))
+
+
+def build_pick(match: Dict[str, Any], odds_index: Dict[Tuple[str, str, str], Dict[str, Any]]) -> Dict[str, Any]:
+    home = match["home_team"]
+    away = match["away_team"]
+    league = match["league"]
+
+    home_strength = stable_team_rating(home) + 3.2
+    away_strength = stable_team_rating(away)
+
+    if league == "Segunda División":
+        home_strength -= 1.0
+
+    diff = home_strength - away_strength
+    abs_diff = abs(diff)
+
+    home_xg = max(0.55, min(1.20 + diff * 0.035, 2.80))
+    away_xg = max(0.40, min(1.00 - diff * 0.022, 2.30))
+    total_xg = home_xg + away_xg
+
+    winner = home if home_strength >= away_strength else away
+    btts = "Sí" if home_xg >= 1.0 and away_xg >= 0.9 and abs_diff < 7.5 else "No"
+    over = "Sí" if total_xg >= 2.60 else "No"
+
+    options: List[Dict[str, Any]] = []
+
+    winner_conf = int(max(68, min(89, 69 + min(abs_diff * 1.7, 18))))
+    winner_conf += get_adjustment_from_stats(league, "winner")
+    options.append({
+        "pick": f"Gana {winner}",
+        "pick_type": "winner",
+        "confidence": winner_conf,
+    })
+
+    if btts == "Sí":
+        btts_conf = int(max(70, min(87, 68 + max(0, (min(home_xg, away_xg) - 0.85) * 14) + max(0, 8 - abs_diff))))
+        btts_conf += get_adjustment_from_stats(league, "btts_yes")
+        options.append({
+            "pick": "Ambos marcan",
+            "pick_type": "btts_yes",
+            "confidence": btts_conf,
+        })
+
+    if over == "Sí":
+        over_conf = int(max(71, min(88, 69 + max(0, (total_xg - 2.35) * 13))))
+        over_conf += get_adjustment_from_stats(league, "over_2_5")
+        options.append({
+            "pick": "Más de 2.5 goles",
+            "pick_type": "over_2_5",
+            "confidence": over_conf,
+        })
+
+    options = [
+        {**o, "confidence": int(max(68, min(92, o["confidence"])))}
+        for o in options
+    ]
+    options.sort(key=lambda x: x["confidence"], reverse=True)
+    best = options[0]
+
+    bookmaker = None
+    bookmaker_market = None
+    bookmaker_odds = None
+    odds_note = ""
+
+    direct_key = (
+        simplify_team_name(home),
+        simplify_team_name(away),
+        normalize_text(league),
+    )
+    reverse_key = (
+        simplify_team_name(away),
+        simplify_team_name(home),
+        normalize_text(league),
+    )
+
+    odds_data = odds_index.get(direct_key) or odds_index.get(reverse_key)
+
+    if best["pick_type"] == "winner" and odds_data:
+        bookmaker = odds_data.get("bookmaker")
+        bookmaker_market = odds_data.get("market")
+
+        if winner == home:
+            bookmaker_odds = odds_data.get("home")
+        elif winner == away:
+            bookmaker_odds = odds_data.get("away")
+
+        implied = implied_confidence_from_odds(bookmaker_odds)
+        if implied:
+            best["confidence"] = int(round((best["confidence"] * 0.65) + (implied * 0.35)))
+            best["confidence"] = int(max(68, min(92, best["confidence"])))
+            odds_note = f"La cuota acompaña esta lectura con referencia de {bookmaker}."
+
+    final_odds = bookmaker_odds if bookmaker_odds else None
+    confidence = best["confidence"]
+    value_data = calculate_value(confidence, final_odds)
+
+    if confidence >= 80:
+        confidence_band = "alta"
+    elif confidence >= 72:
+        confidence_band = "media"
+    else:
+        confidence_band = "intermedia"
+
+    cards = predict_cards(league, home_strength, away_strength, home, away)
+    form_note = (
+        f"{home} parte con una ventaja teórica mayor sobre {away}."
+        if winner == home else
+        f"{away} parece llegar mejor preparado para este contexto."
+    )
+
+    explanation = tipster_explanation(
+        best,
+        home,
+        away,
+        winner,
+        btts,
+        over,
+        cards,
+        {"form_note": form_note, "odds_note": odds_note},
+    )
+
+    return {
+        "id": match["id"],
+        "match": match["match"],
+        "league": league,
+        "time_local": match["dt_local"].strftime("%d/%m %H:%M"),
+        "kickoff_iso": match["dt_local"].isoformat(),
+        "pick": best["pick"],
+        "pick_type": best["pick_type"],
+        "confidence": confidence,
+        "confidence_band": confidence_band,
+        "odds_estimate": round(final_odds, 2) if final_odds is not None else None,
+        "odds_band": confidence_band,
+        "pick_winner": winner,
+        "btts": btts,
+        "over_2_5": over,
+        "cards": cards,
+        "home_team": home,
+        "away_team": away,
+        "status": "pending",
+        "score_line": "",
+        "tipster_explanation": explanation,
+        "source": match.get("source", "unknown"),
+        "bookmaker": bookmaker,
+        "bookmaker_market": bookmaker_market,
+        "model_confidence": value_data["model_prob"],
+        "book_confidence": value_data["book_prob"],
+        "value_edge": value_data["edge"],
+        "has_value": value_data["has_value"],
+        "stake": value_data["stake"],
+    }
+
+
+def build_picks() -> List[Dict[str, Any]]:
+    matches = get_real_matches()
+    odds_index = fetch_live_odds_index()
+    picks = [build_pick(m, odds_index) for m in matches]
+    picks = [p for p in picks if p["confidence"] >= MIN_CONFIDENCE and p.get("has_value")]
+    picks.sort(key=lambda x: x["confidence"], reverse=True)
+    return picks[:MAX_PICKS]
+
+
+def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    eligible = [p for p in picks if p["confidence"] >= 80]
+    combo: List[Dict[str, Any]] = []
+    used = set()
+
+    for p in eligible:
+        if p["match"] in used:
+            continue
+        combo.append(p)
+        used.add(p["match"])
+        if len(combo) == 3:
+            break
+
+    if len(combo) < 2:
+        for p in picks:
+            if p["match"] in used:
+                continue
+            combo.append(p)
+            used.add(p["match"])
+            if len(combo) == 2:
+                break
+
+    total_odds = 1.0
+    valid_odds_count = 0
+
+    for p in combo:
+        if p.get("odds_estimate") is not None:
+            total_odds *= p["odds_estimate"]
+            valid_odds_count += 1
+
+    return {
+        "size": len(combo),
+        "estimated_total_odds": round(total_odds, 2) if valid_odds_count == len(combo) and combo else None,
+        "confidence": int(sum(p["confidence"] for p in combo) / len(combo)) if combo else 0,
+        "picks": combo,
+    }
+
+
+def group_picks(picks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    return {
+        "alta": [p for p in picks if p["confidence"] >= 80],
+        "media": [p for p in picks if 72 <= p["confidence"] < 80],
+        "intermedia": [p for p in picks if p["confidence"] < 72],
+    }
+
+# =========================================================
+# RESULT EVALUATION / HISTORY
+# =========================================================
+
+def evaluate_pick_result(pick: Dict[str, Any], home_goals: int, away_goals: int) -> str:
+    pick_type = pick.get("pick_type")
+    selected_pick = pick.get("pick", "")
+
+    if pick_type == "winner":
+        if home_goals > away_goals and selected_pick == f"Gana {pick.get('home_team')}":
+            return "won"
+        if away_goals > home_goals and selected_pick == f"Gana {pick.get('away_team')}":
+            return "won"
+        return "lost"
+
+    if pick_type == "btts_yes":
+        return "won" if home_goals > 0 and away_goals > 0 else "lost"
+
+    if pick_type == "over_2_5":
+        return "won" if (home_goals + away_goals) > 2 else "lost"
+
+    return "pending"
+
+
+def get_finished_scores_sportsdb() -> List[Dict[str, Any]]:
+    results = []
+    try:
+        for league_id, league_name in SPORTSDB_LEAGUES.items():
+            events: List[Dict[str, Any]] = []
+
+            for season in SEASON_CANDIDATES_SPORTSDB:
+                try:
+                    data = sportsdb_get(f"/eventsseason.php?id={league_id}&s={season}")
+                    season_events = data.get("events") or []
+                    if season_events:
+                        events.extend(season_events)
+                        break
+                except Exception:
+                    pass
+
+            for ev in events:
+                home = (ev.get("strHomeTeam") or "").strip()
+                away = (ev.get("strAwayTeam") or "").strip()
+                status = (ev.get("strStatus") or "").lower()
+                home_score = ev.get("intHomeScore")
+                away_score = ev.get("intAwayScore")
+
+                if not home or not away:
+                    continue
+                if home_score is None or away_score is None:
+                    continue
+
+                if status and all(x not in status for x in ["match finished", "ft", "after pen", "aet"]):
+                    continue
+
+                try:
+                    dt_local = parse_sportsdb_datetime(ev.get("dateEvent"), ev.get("strTime"))
+                except Exception:
+                    continue
+
+                results.append({
+                    "home_team": home,
+                    "away_team": away,
+                    "league": league_name,
+                    "kickoff_iso": dt_local.isoformat(),
+                    "home_goals": int(home_score),
+                    "away_goals": int(away_score),
+                    "score_line": f"{home_score}-{away_score}",
+                })
+    except Exception:
+        pass
+
+    return results
+
+
+def get_finished_scores_football_data() -> List[Dict[str, Any]]:
+    results = []
+    try:
+        start_date = (now_local() - timedelta(days=10)).date().isoformat()
+        end_date = now_local().date().isoformat()
+
+        for code, league_name in FOOTBALL_DATA_LEAGUES.items():
+            data = football_data_get(
+                f"/competitions/{code}/matches",
+                {"dateFrom": start_date, "dateTo": end_date},
+            )
+
+            for item in data.get("matches") or []:
+                status = (item.get("status") or "").upper()
+                if status not in ["FINISHED", "AWARDED"]:
+                    continue
+
+                home = ((item.get("homeTeam") or {}).get("name") or "").strip()
+                away = ((item.get("awayTeam") or {}).get("name") or "").strip()
+                full_time = ((item.get("score") or {}).get("fullTime") or {})
+                home_goals = full_time.get("home")
+                away_goals = full_time.get("away")
+
+                if not home or not away or home_goals is None or away_goals is None:
+                    continue
+
+                try:
+                    dt_local = datetime.fromisoformat(item["utcDate"].replace("Z", "+00:00")).astimezone(TZ)
+                except Exception:
+                    continue
+
+                results.append({
+                    "home_team": home,
+                    "away_team": away,
+                    "league": league_name,
+                    "kickoff_iso": dt_local.isoformat(),
+                    "home_goals": int(home_goals),
+                    "away_goals": int(away_goals),
+                    "score_line": f"{home_goals}-{away_goals}",
+                })
+    except Exception:
+        pass
+
+    return results
+
+
+def update_history_finished_matches(history: Dict[str, Any]) -> Dict[str, Any]:
+    finished_results = get_finished_scores_football_data() + get_finished_scores_sportsdb()
+
+    result_index = {}
+    for r in finished_results:
+        key = (
+            simplify_team_name(r["home_team"]),
+            simplify_team_name(r["away_team"]),
+            normalize_text(r["league"]),
+            r["kickoff_iso"],
+        )
+        result_index[key] = r
+
+    for _, day_data in history.get("days", {}).items():
+        for pick in day_data.get("picks", []):
+            if pick.get("status") in ["won", "lost"]:
+                continue
+
+            key = (
+                simplify_team_name(pick.get("home_team")),
+                simplify_team_name(pick.get("away_team")),
+                normalize_text(pick.get("league")),
+                pick.get("kickoff_iso"),
+            )
+
+            result = result_index.get(key)
+            if not result:
+                continue
+
+            pick["score_line"] = result["score_line"]
+            pick["status"] = evaluate_pick_result(
+                pick,
+                result["home_goals"],
+                result["away_goals"],
+            )
+
+    return refresh_history_stats(history)
+
+# =========================================================
+# HISTORY
+# =========================================================
+
+def refresh_history_stats(history: Dict[str, Any]) -> Dict[str, Any]:
+    history.setdefault("days", {})
+    for _, day_data in history["days"].items():
+        picks = day_data.get("picks", [])
+        day_data["stats"] = {
+            "won": sum(1 for p in picks if p.get("status") == "won"),
+            "lost": sum(1 for p in picks if p.get("status") == "lost"),
+            "pending": sum(1 for p in picks if p.get("status") == "pending"),
+        }
+    return history
+
+
+def trim_history(history: Dict[str, Any]) -> Dict[str, Any]:
+    days_obj = history.get("days", {})
+    sorted_keys = sorted(days_obj.keys(), reverse=True)
+    keep = set(sorted_keys[:MAX_HISTORY_DAYS])
+    history["days"] = {k: v for k, v in days_obj.items() if k in keep}
+    return history
+
+
+def merge_today_history(history: Dict[str, Any], picks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    history.setdefault("days", {})
+    day = today_key()
+
+    existing_day = history["days"].get(day, {"picks": []})
+    existing_picks = existing_day.get("picks", [])
+
+    existing_index = {}
+    for p in existing_picks:
+        key = (
+            simplify_team_name(p.get("home_team")),
+            simplify_team_name(p.get("away_team")),
+            normalize_text(p.get("league")),
+            p.get("kickoff_iso"),
+        )
+        existing_index[key] = p
+
+    for p in picks:
+        key = (
+            simplify_team_name(p.get("home_team")),
+            simplify_team_name(p.get("away_team")),
+            normalize_text(p.get("league")),
+            p.get("kickoff_iso"),
+        )
+
+        if key not in existing_index:
+            existing_picks.append(p)
+        else:
+            old = existing_index[key]
+            for field in [
+                "pick", "pick_type", "confidence", "confidence_band", "odds_estimate",
+                "odds_band", "tipster_explanation", "source", "bookmaker", "bookmaker_market",
+                "model_confidence", "book_confidence", "value_edge", "has_value", "stake"
+            ]:
+                old[field] = p.get(field, old.get(field))
+
+    history["days"][day] = {"picks": existing_picks}
+    history = refresh_history_stats(history)
+    history = trim_history(history)
+    return history
+
+
+def history_to_frontend(history: Dict[str, Any], page: int = 1, page_size: int = HISTORY_PAGE_SIZE) -> Dict[str, Any]:
+    days_obj = history.get("days", {})
+    all_picks = []
+
+    for day, data in sorted(days_obj.items(), reverse=True):
+        for p in data.get("picks", []):
+            item = dict(p)
+            item["history_date"] = day
+            all_picks.append(item)
+
+    total_items = len(all_picks)
+    total_pages = max(1, math.ceil(total_items / page_size))
+    page = max(1, min(page, total_pages))
+
+    start = (page - 1) * page_size
+    end = start + page_size
+    page_items = all_picks[start:end]
+
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total_items": total_items,
+        "total_pages": total_pages,
+        "items": page_items,
+    }
+
+# =========================================================
+# MODEL STATS REFRESH
+# =========================================================
+
+def refresh_model_stats_from_history(history: Dict[str, Any]) -> None:
+    stats = rebuild_model_stats_from_history(history)
+    save_model_stats(stats)
+
+# =========================================================
+# PAYLOAD / CACHE
+# =========================================================
+
+def build_payload() -> Dict[str, Any]:
+    try:
+        picks = build_picks()
+    except Exception:
+        picks = []
+
+    history = read_json(HISTORY_FILE)
+
+    if picks:
+        history = merge_today_history(history, picks)
+
+    history = update_history_finished_matches(history)
+    refresh_model_stats_from_history(history)
+    dashboard_stats = compute_dashboard_stats(history)
+
+    payload = {
+        "generated_at": now_local().isoformat(),
+        "cache_day": today_key(),
+        "lookahead_hours": LOOKAHEAD_HOURS,
+        "count": len(picks),
+        "picks": picks,
+        "combo_of_day": build_combo(picks) if picks else {},
+        "groups": group_picks(picks) if picks else {"alta": [], "media": [], "intermedia": []},
+        "dashboard_stats": dashboard_stats,
+    }
+
+    try:
+        write_json(HISTORY_FILE, history)
+    except Exception:
+        pass
+
+    try:
+        write_json(CACHE_FILE, payload)
+    except Exception:
+        pass
+
+    return payload
+
+
+def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
+    cache = read_json(CACHE_FILE)
+    if not force_refresh and cache_is_valid(cache):
+        return cache
+    return build_payload()
+
+# =========================================================
+# ROUTES
+# =========================================================
+
+@app.get("/")
+def root() -> Dict[str, Any]:
+    return {
+        "ok": True,
+        "msg": "API funcionando con cuotas reales si hay disponibilidad"
+    }
+
+
+@app.get("/test")
+def test() -> Dict[str, Any]:
+    return {"ok": True}
+
+
+@app.get("/test-api")
+def test_api() -> Dict[str, Any]:
+    try:
+        sportsdb_matches = get_sportsdb_matches()
+        football_data_matches = get_football_data_matches()
+        api_football_matches = get_api_football_matches()
+        allsports_matches = get_allsports_matches()
+        merged = get_real_matches()
+        odds_index = fetch_live_odds_index()
+        state = load_api_state()
+
+        return {
+            "ok": True,
+            "sportsdb_count": len(sportsdb_matches),
+            "football_data_count": len(football_data_matches),
+            "api_football_count": len(api_football_matches),
+            "allsports_count": len(allsports_matches),
+            "final_count": len(merged),
+            "odds_count": len(odds_index),
+            "api_state": state,
+            "matches": [
+                {
+                    "match": m["match"],
+                    "league": m["league"],
+                    "time_local": m["dt_local"].strftime("%d/%m %H:%M"),
+                    "source": m["source"],
+                }
+                for m in merged[:15]
+            ],
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/picks")
+def picks(force_refresh: bool = Query(False)) -> Dict[str, Any]:
+    try:
+        return get_cached_or_refresh(force_refresh=force_refresh)
+    except Exception as e:
+        cache = read_json(CACHE_FILE)
+        if cache:
+            return cache
+
+        return {
+            "error": True,
+            "message": str(e),
+            "count": 0,
+            "picks": [],
+            "combo_of_day": {},
+            "groups": {"alta": [], "media": [], "intermedia": []},
+            "dashboard_stats": {"hits": "0/0", "effectiveness": 0.0, "profit": 0.0, "total_picks": 0},
+        }
+
+
+@app.get("/api/history")
+def history(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(HISTORY_PAGE_SIZE, ge=1, le=100),
+) -> Dict[str, Any]:
+    try:
+        raw = read_json(HISTORY_FILE)
+        raw = update_history_finished_matches(raw)
+        raw = refresh_history_stats(raw)
+        raw = trim_history(raw)
+        write_json(HISTORY_FILE, raw)
+        refresh_model_stats_from_history(raw)
+        return history_to_frontend(raw, page=page, page_size=page_size)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
+
+
+@app.get("/api/odds")
+def odds_snapshot() -> Dict[str, Any]:
+    try:
+        odds = fetch_live_odds_index()
+        items = []
+        for key, value in odds.items():
+            items.append({
+                "match_key": key,
+                "bookmaker": value.get("bookmaker"),
+                "market": value.get("market"),
+                "home": value.get("home"),
+                "draw": value.get("draw"),
+                "away": value.get("away"),
+            })
+        return {"count": len(items), "items": items}
+    except Exception as e:
+        return {"count": 0, "items": [], "error": str(e)}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=10000, reload=True)
