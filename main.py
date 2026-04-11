@@ -77,7 +77,6 @@ ODDS_SPORT_KEYS = {
 }
 
 TEAM_RATINGS = {
-    # LaLiga
     "Real Madrid": 93,
     "Real Madrid CF": 93,
     "Barcelona": 91,
@@ -112,7 +111,6 @@ TEAM_RATINGS = {
     "Alaves": 73,
     "Deportivo Alavés": 73,
 
-    # Segunda
     "Almería": 78,
     "UD Almería": 78,
     "Granada": 77,
@@ -158,7 +156,6 @@ TEAM_RATINGS = {
     "Deportivo La Coruna": 72,
     "Deportivo de La Coruna": 72,
 
-    # Champions / top europeos
     "Manchester City": 94,
     "Manchester City FC": 94,
     "Arsenal": 91,
@@ -529,7 +526,7 @@ def get_api_football_matches() -> List[Dict[str, Any]]:
         return []
 
 # =========================================================
-# FOOTBALL-DATA.ORG
+# FOOTBALL-DATA
 # =========================================================
 
 def football_data_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -601,7 +598,7 @@ def get_football_data_matches() -> List[Dict[str, Any]]:
         return []
 
 # =========================================================
-# ALLSPORTSAPI
+# ALLSPORTS
 # =========================================================
 
 def allsports_get(params: Dict[str, Any]) -> Dict[str, Any]:
@@ -872,6 +869,92 @@ def get_adjustment_from_stats(league: str, pick_type: str) -> int:
     return adjustment
 
 # =========================================================
+# VALUE BETTING
+# =========================================================
+
+def implied_probability(odds: float) -> float:
+    if not odds or odds <= 1:
+        return 0.0
+    return 1.0 / odds
+
+
+def calculate_value(confidence: int, odds: Optional[float]) -> Dict[str, Any]:
+    if not odds:
+        return {
+            "model_prob": None,
+            "book_prob": None,
+            "edge": None,
+            "has_value": False,
+            "stake": 0,
+        }
+
+    model_prob = confidence / 100.0
+    book_prob = implied_probability(odds)
+    edge = model_prob - book_prob
+
+    if edge >= 0.12:
+        stake = 5
+    elif edge >= 0.08:
+        stake = 4
+    elif edge >= 0.05:
+        stake = 3
+    elif edge >= 0.03:
+        stake = 2
+    elif edge >= 0.015:
+        stake = 1
+    else:
+        stake = 0
+
+    has_value = edge >= 0.03
+
+    return {
+        "model_prob": round(model_prob * 100, 1),
+        "book_prob": round(book_prob * 100, 1),
+        "edge": round(edge * 100, 2),
+        "has_value": has_value,
+        "stake": stake,
+    }
+
+
+def compute_dashboard_stats(history: Dict[str, Any]) -> Dict[str, Any]:
+    won = 0
+    lost = 0
+    total = 0
+    profit = 0.0
+
+    for _, day in history.get("days", {}).items():
+        for pick in day.get("picks", []):
+            status = pick.get("status")
+            if status not in ["won", "lost"]:
+                continue
+
+            total += 1
+            if status == "won":
+                won += 1
+            else:
+                lost += 1
+
+            stake = float(pick.get("stake", 0) or 0)
+            odds = pick.get("odds_estimate")
+
+            if stake <= 0:
+                continue
+
+            if status == "won" and odds:
+                profit += (float(odds) - 1.0) * stake
+            elif status == "lost":
+                profit -= stake
+
+    effectiveness = round((won / total) * 100, 1) if total > 0 else 0.0
+
+    return {
+        "hits": f"{won}/{total}" if total > 0 else "0/0",
+        "effectiveness": effectiveness,
+        "profit": round(profit, 2),
+        "total_picks": total,
+    }
+
+# =========================================================
 # MERGE / DEDUP
 # =========================================================
 
@@ -1064,10 +1147,11 @@ def build_pick(match: Dict[str, Any], odds_index: Dict[Tuple[str, str, str], Dic
         if implied:
             best["confidence"] = int(round((best["confidence"] * 0.65) + (implied * 0.35)))
             best["confidence"] = int(max(68, min(92, best["confidence"])))
-            odds_note = f"La cuota en tiempo real acompaña esta lectura con referencia de {bookmaker}."
+            odds_note = f"La cuota acompaña esta lectura con referencia de {bookmaker}."
 
     final_odds = bookmaker_odds if bookmaker_odds else None
     confidence = best["confidence"]
+    value_data = calculate_value(confidence, final_odds)
 
     if confidence >= 80:
         confidence_band = "alta"
@@ -1118,6 +1202,11 @@ def build_pick(match: Dict[str, Any], odds_index: Dict[Tuple[str, str, str], Dic
         "source": match.get("source", "unknown"),
         "bookmaker": bookmaker,
         "bookmaker_market": bookmaker_market,
+        "model_confidence": value_data["model_prob"],
+        "book_confidence": value_data["book_prob"],
+        "value_edge": value_data["edge"],
+        "has_value": value_data["has_value"],
+        "stake": value_data["stake"],
     }
 
 
@@ -1125,7 +1214,10 @@ def build_picks() -> List[Dict[str, Any]]:
     matches = get_real_matches()
     odds_index = fetch_live_odds_index()
     picks = [build_pick(m, odds_index) for m in matches]
-    picks = [p for p in picks if p["confidence"] >= MIN_CONFIDENCE]
+    picks = [
+        p for p in picks
+        if p["confidence"] >= MIN_CONFIDENCE and p.get("has_value")
+    ]
     picks.sort(key=lambda x: x["confidence"], reverse=True)
     return picks[:MAX_PICKS]
 
@@ -1389,7 +1481,8 @@ def merge_today_history(history: Dict[str, Any], picks: List[Dict[str, Any]]) ->
             old = existing_index[key]
             for field in [
                 "pick", "pick_type", "confidence", "confidence_band", "odds_estimate",
-                "odds_band", "tipster_explanation", "source", "bookmaker", "bookmaker_market"
+                "odds_band", "tipster_explanation", "source", "bookmaker", "bookmaker_market",
+                "model_confidence", "book_confidence", "value_edge", "has_value", "stake"
             ]:
                 old[field] = p.get(field, old.get(field))
 
@@ -1443,6 +1536,15 @@ def build_payload() -> Dict[str, Any]:
     except Exception:
         picks = []
 
+    history = read_json(HISTORY_FILE)
+
+    if picks:
+        history = merge_today_history(history, picks)
+
+    history = update_history_finished_matches(history)
+    refresh_model_stats_from_history(history)
+    dashboard_stats = compute_dashboard_stats(history)
+
     payload = {
         "generated_at": now_local().isoformat(),
         "cache_day": today_key(),
@@ -1451,15 +1553,8 @@ def build_payload() -> Dict[str, Any]:
         "picks": picks,
         "combo_of_day": build_combo(picks) if picks else {},
         "groups": group_picks(picks) if picks else {"alta": [], "media": [], "intermedia": []},
+        "dashboard_stats": dashboard_stats,
     }
-
-    history = read_json(HISTORY_FILE)
-
-    if picks:
-        history = merge_today_history(history, picks)
-
-    history = update_history_finished_matches(history)
-    refresh_model_stats_from_history(history)
 
     try:
         write_json(HISTORY_FILE, history)
@@ -1547,6 +1642,7 @@ def picks(force_refresh: bool = Query(False)) -> Dict[str, Any]:
             "picks": [],
             "combo_of_day": {},
             "groups": {"alta": [], "media": [], "intermedia": []},
+            "dashboard_stats": {"hits": "0/0", "effectiveness": 0.0, "profit": 0.0, "total_picks": 0},
         }
 
 
