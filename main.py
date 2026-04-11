@@ -776,12 +776,8 @@ def fetch_live_odds_index() -> Dict[Tuple[str, str, str], Dict[str, Any]]:
 
             for event in data or []:
                 home = (event.get("home_team") or "").strip()
-                away = ""
-                for t in event.get("away_team", []):
-                    pass
                 away = (event.get("away_team") or "").strip()
 
-                # v4 returns home_team + away_team, but some payloads only provide teams
                 if not away:
                     teams = event.get("teams") or []
                     if len(teams) == 2:
@@ -980,16 +976,6 @@ def predict_cards(league: str, home_strength: float, away_strength: float, home:
     return {home: int(home_cards), away: int(away_cards)}
 
 
-def estimate_odds_from_confidence(confidence: int, pick_type: str) -> float:
-    if pick_type == "winner":
-        base = 2.30 - (confidence - 60) * 0.024
-    elif pick_type == "over_2_5":
-        base = 2.42 - (confidence - 60) * 0.022
-    else:
-        base = 2.48 - (confidence - 60) * 0.021
-    return round(max(1.42, min(base, 2.60)), 2)
-
-
 def implied_confidence_from_odds(decimal_odds: Optional[float]) -> Optional[int]:
     if not decimal_odds or decimal_odds <= 1.0:
         return None
@@ -1023,7 +1009,6 @@ def build_pick(match: Dict[str, Any], odds_index: Dict[Tuple[str, str, str], Dic
 
     winner_conf = int(max(68, min(89, 69 + min(abs_diff * 1.7, 18))))
     winner_conf += get_adjustment_from_stats(league, "winner")
-
     options.append({
         "pick": f"Gana {winner}",
         "pick_type": "winner",
@@ -1081,7 +1066,7 @@ def build_pick(match: Dict[str, Any], odds_index: Dict[Tuple[str, str, str], Dic
             best["confidence"] = int(max(68, min(92, best["confidence"])))
             odds_note = f"La cuota en tiempo real acompaña esta lectura con referencia de {bookmaker}."
 
-    final_odds = bookmaker_odds if bookmaker_odds else estimate_odds_from_confidence(best["confidence"], best["pick_type"])
+    final_odds = bookmaker_odds if bookmaker_odds else None
     confidence = best["confidence"]
 
     if confidence >= 80:
@@ -1119,7 +1104,7 @@ def build_pick(match: Dict[str, Any], odds_index: Dict[Tuple[str, str, str], Dic
         "pick_type": best["pick_type"],
         "confidence": confidence,
         "confidence_band": confidence_band,
-        "odds_estimate": round(final_odds, 2) if final_odds else None,
+        "odds_estimate": round(final_odds, 2) if final_odds is not None else None,
         "odds_band": confidence_band,
         "pick_winner": winner,
         "btts": btts,
@@ -1141,7 +1126,7 @@ def build_picks() -> List[Dict[str, Any]]:
     odds_index = fetch_live_odds_index()
     picks = [build_pick(m, odds_index) for m in matches]
     picks = [p for p in picks if p["confidence"] >= MIN_CONFIDENCE]
-    picks.sort(key=lambda x: (x["confidence"], -(x["odds_estimate"] or 999)), reverse=True)
+    picks.sort(key=lambda x: x["confidence"], reverse=True)
     return picks[:MAX_PICKS]
 
 
@@ -1168,13 +1153,16 @@ def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
                 break
 
     total_odds = 1.0
+    valid_odds_count = 0
+
     for p in combo:
-        if p.get("odds_estimate"):
+        if p.get("odds_estimate") is not None:
             total_odds *= p["odds_estimate"]
+            valid_odds_count += 1
 
     return {
         "size": len(combo),
-        "estimated_total_odds": round(total_odds, 2) if combo else 0,
+        "estimated_total_odds": round(total_odds, 2) if valid_odds_count == len(combo) and combo else None,
         "confidence": int(sum(p["confidence"] for p in combo) / len(combo)) if combo else 0,
         "picks": combo,
     }
@@ -1500,7 +1488,7 @@ def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
 def root() -> Dict[str, Any]:
     return {
         "ok": True,
-        "msg": "API funcionando con LaLiga, Segunda División y Champions"
+        "msg": "API funcionando con cuotas reales si hay disponibilidad"
     }
 
 
