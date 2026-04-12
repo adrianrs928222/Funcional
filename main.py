@@ -747,6 +747,7 @@ def get_allsports_matches() -> List[Dict[str, Any]]:
     except Exception as e:
         set_api_cooldown("allsports", parse_requests_error(e))
         return []
+
 # =========================================================
 # ODDS API
 # =========================================================
@@ -1265,6 +1266,7 @@ def build_real_market_picks_for_match(
     out = [p for p in out if p.get("odds_estimate")]
     out.sort(key=lambda x: (x["confidence"], -(abs((x["odds_estimate"] or 2.0) - 1.90))), reverse=True)
     return out
+
 # =========================================================
 # CREATED BET / COMBI
 # =========================================================
