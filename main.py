@@ -968,3 +968,348 @@ def get_real_matches() -> List[Dict[str, Any]]:
     unique = list(dedup.values())
     unique.sort(key=lambda x: x["dt_local"])
     return unique[:MAX_PICKS]
+# =========================================================
+# HELPERS DE MERCADO / VALOR
+# =========================================================
+
+def implied_probability(odds: float) -> Optional[float]:
+    if not odds or odds <= 1:
+        return None
+    return round(100 / odds, 1)
+
+
+def calculate_value(confidence: int, odds: Optional[float]) -> Dict[str, Any]:
+    if not odds:
+        return {
+            "model_prob": None,
+            "book_prob": None,
+            "edge": None,
+            "has_value": False,
+            "stake": 0,
+        }
+
+    model_prob = float(confidence)
+    book_prob = implied_probability(odds)
+    edge = round(model_prob - book_prob, 1) if book_prob is not None else None
+
+    stake = 0
+    if edge is not None:
+        if edge >= 12:
+            stake = 5
+        elif edge >= 8:
+            stake = 4
+        elif edge >= 5:
+            stake = 3
+        elif edge >= 3:
+            stake = 2
+        elif edge >= 1.5:
+            stake = 1
+
+    return {
+        "model_prob": round(model_prob, 1),
+        "book_prob": book_prob,
+        "edge": edge,
+        "has_value": edge is not None and edge >= 1.5,
+        "stake": stake,
+    }
+
+
+def confidence_band(confidence: int) -> str:
+    if confidence >= 80:
+        return "alta"
+    if confidence >= 72:
+        return "media"
+    return "intermedia"
+
+
+def is_draw_trap(home: str, away: str, abs_diff: float) -> bool:
+    home_s = simplify_team_name(home)
+    away_s = simplify_team_name(away)
+
+    if abs_diff < 4.5:
+        return True
+
+    if home_s in DRAW_TRAP_TEAMS or away_s in DRAW_TRAP_TEAMS:
+        return True
+
+    return False
+
+
+def anti_draw_penalty(home: str, away: str, abs_diff: float) -> int:
+    penalty = 0
+
+    if abs_diff < 4.5:
+        penalty += 10
+    elif abs_diff < 6.0:
+        penalty += 6
+
+    home_s = simplify_team_name(home)
+    away_s = simplify_team_name(away)
+
+    if home_s in DRAW_TRAP_TEAMS or away_s in DRAW_TRAP_TEAMS:
+        penalty += 5
+
+    return penalty
+
+
+def market_read_adjustment(bookmaker_odds: Optional[float], confidence: int) -> Tuple[int, str]:
+    if not bookmaker_odds:
+        return confidence, ""
+
+    market_prob = implied_probability(bookmaker_odds)
+    if market_prob is None:
+        return confidence, ""
+
+    diff = confidence - market_prob
+
+    if diff >= 10:
+        confidence += 2
+        return min(confidence, 92), "El mercado acompaña bastante bien la lectura del pick."
+    if diff <= -8:
+        confidence -= 6
+        return max(confidence, 60), "El mercado es mucho más prudente y eso obliga a bajar la confianza."
+    if diff <= -4:
+        confidence -= 3
+        return max(confidence, 60), "El mercado no va tan fuerte en esta dirección y ajusto algo la confianza."
+
+    return confidence, ""
+
+
+def safe_odds_from_confidence(confidence: int, market_type: str) -> float:
+    # fallback interno para evitar que falten picks.
+    if market_type == "double_chance":
+        base = 1.28 + (100 - confidence) * 0.006
+        return round(min(max(base, 1.22), 1.65), 2)
+
+    if market_type == "under_3_5":
+        base = 1.38 + (100 - confidence) * 0.007
+        return round(min(max(base, 1.28), 1.88), 2)
+
+    if market_type == "under_2_5":
+        base = 1.62 + (100 - confidence) * 0.008
+        return round(min(max(base, 1.45), 2.25), 2)
+
+    if market_type == "over_2_5":
+        base = 1.68 + (100 - confidence) * 0.008
+        return round(min(max(base, 1.52), 2.30), 2)
+
+    if market_type == "btts_yes":
+        base = 1.70 + (100 - confidence) * 0.008
+        return round(min(max(base, 1.55), 2.35), 2)
+
+    if market_type == "btts_no":
+        base = 1.66 + (100 - confidence) * 0.008
+        return round(min(max(base, 1.50), 2.30), 2)
+
+    if market_type == "team_cards":
+        base = 1.55 + (100 - confidence) * 0.007
+        return round(min(max(base, 1.40), 2.10), 2)
+
+    base = 1.65 + (100 - confidence) * 0.008
+    return round(min(max(base, 1.35), 2.60), 2)
+
+
+# =========================================================
+# HELPERS DE PRONÓSTICO
+# =========================================================
+
+def predict_cards(league: str, home_strength: float, away_strength: float, home: str, away: str) -> Dict[str, int]:
+    base_cards = {
+        "LaLiga": 5,
+        "Segunda División": 6,
+        "Champions League": 4,
+    }
+    total = base_cards.get(league, 5)
+
+    if home_strength > away_strength:
+        away_cards = min(total - 1, max(2, round(total * 0.58)))
+        home_cards = total - away_cards
+    elif away_strength > home_strength:
+        home_cards = min(total - 1, max(2, round(total * 0.58)))
+        away_cards = total - home_cards
+    else:
+        home_cards = total // 2
+        away_cards = total - home_cards
+
+    return {home: int(home_cards), away: int(away_cards)}
+
+
+def team_cards_market(home: str, away: str, home_strength: float, away_strength: float, league: str) -> Dict[str, Any]:
+    home_s = simplify_team_name(home)
+    away_s = simplify_team_name(away)
+
+    diff = home_strength - away_strength
+    abs_diff = abs(diff)
+
+    if diff >= 4:
+        card_team = away
+        card_team_s = away_s
+        line = 1.5 if league == "Champions League" else 2.5
+        conf = 72 + min(abs_diff * 1.2, 10)
+    elif diff <= -4:
+        card_team = home
+        card_team_s = home_s
+        line = 1.5 if league == "Champions League" else 2.5
+        conf = 72 + min(abs_diff * 1.2, 10)
+    else:
+        if away_s in AGGRESSIVE_CARD_TEAMS:
+            card_team = away
+            card_team_s = away_s
+            line = 1.5
+            conf = 73
+        else:
+            card_team = home
+            card_team_s = home_s
+            line = 1.5
+            conf = 72
+
+    if card_team_s in AGGRESSIVE_CARD_TEAMS:
+        conf += 5
+
+    conf = int(min(conf, 88))
+    pick_text = f"Más de {line} tarjetas {card_team}"
+
+    return {
+        "pick": pick_text,
+        "pick_type": "team_cards",
+        "confidence": conf,
+        "cards_team": card_team,
+        "cards_line": line,
+    }
+
+
+def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
+    home = match["home_team"]
+    away = match["away_team"]
+    league = match["league"]
+
+    home_strength = stable_team_rating(home) + 3.2
+    away_strength = stable_team_rating(away)
+
+    if league == "Segunda División":
+        home_strength -= 1.0
+
+    diff = home_strength - away_strength
+    abs_diff = abs(diff)
+
+    home_xg = max(0.55, min(1.20 + diff * 0.035, 2.80))
+    away_xg = max(0.40, min(1.00 - diff * 0.022, 2.30))
+    total_xg = home_xg + away_xg
+
+    winner = home if home_strength >= away_strength else away
+    loser = away if winner == home else home
+
+    draw_trap = is_draw_trap(home, away, abs_diff)
+    draw_penalty = anti_draw_penalty(home, away, abs_diff)
+
+    options: List[Dict[str, Any]] = []
+
+    # GANADOR
+    winner_conf = int(max(68, min(89, 69 + min(abs_diff * 1.7, 18))))
+    winner_conf += get_adjustment_from_stats(league, "winner")
+    winner_conf -= draw_penalty
+
+    options.append({
+        "pick": f"Gana {winner}",
+        "pick_type": "winner",
+        "confidence": int(max(60, min(92, winner_conf))),
+        "winner_team": winner,
+    })
+
+    # DOBLE OPORTUNIDAD
+    if diff >= 0:
+        dc_pick = f"1X {home}"
+    else:
+        dc_pick = f"X2 {away}"
+
+    dc_conf = 74 + min(abs_diff * 1.1, 10)
+    if draw_trap:
+        dc_conf += 6
+    if abs_diff < 4:
+        dc_conf += 4
+
+    options.append({
+        "pick": dc_pick,
+        "pick_type": "double_chance",
+        "confidence": int(max(68, min(91, dc_conf))),
+    })
+
+    # OVER 2.5
+    if total_xg >= 2.45:
+        over_conf = 69 + max(0, (total_xg - 2.25) * 12)
+        over_conf += get_adjustment_from_stats(league, "over_2_5")
+        if abs_diff < 5.5:
+            over_conf += 1
+
+        options.append({
+            "pick": "Más de 2.5 goles",
+            "pick_type": "over_2_5",
+            "confidence": int(max(64, min(89, over_conf))),
+        })
+
+    # UNDER 2.5
+    if total_xg <= 2.45 or draw_trap:
+        under25_conf = 70 + max(0, (2.50 - total_xg) * 14)
+        if draw_trap:
+            under25_conf += 4
+
+        options.append({
+            "pick": "Menos de 2.5 goles",
+            "pick_type": "under_2_5",
+            "confidence": int(max(66, min(89, under25_conf))),
+        })
+
+    # UNDER 3.5
+    under35_conf = 73
+    if total_xg <= 2.90:
+        under35_conf += max(0, (3.05 - total_xg) * 9)
+    if draw_trap:
+        under35_conf += 5
+
+    options.append({
+        "pick": "Menos de 3.5 goles",
+        "pick_type": "under_3_5",
+        "confidence": int(max(68, min(90, under35_conf))),
+    })
+
+    # BTTS SI
+    if home_xg >= 1.0 and away_xg >= 0.9 and abs_diff < 7.5:
+        btts_yes_conf = 68 + max(0, (min(home_xg, away_xg) - 0.85) * 14) + max(0, 8 - abs_diff)
+
+        options.append({
+            "pick": "Ambos marcan",
+            "pick_type": "btts_yes",
+            "confidence": int(max(64, min(87, btts_yes_conf))),
+        })
+
+    # BTTS NO
+    if total_xg <= 2.55 or abs_diff >= 6.5 or draw_trap:
+        btts_no_conf = 70
+        if total_xg <= 2.35:
+            btts_no_conf += 4
+        if abs_diff >= 6.5:
+            btts_no_conf += 3
+        if draw_trap:
+            btts_no_conf += 3
+
+        options.append({
+            "pick": "Ambos no marcan",
+            "pick_type": "btts_no",
+            "confidence": int(max(66, min(88, btts_no_conf))),
+        })
+
+    # TARJETAS DE EQUIPO
+    options.append(team_cards_market(home, away, home_strength, away_strength, league))
+
+    # Campos auxiliares para explicación
+    for o in options:
+        o["home_strength"] = home_strength
+        o["away_strength"] = away_strength
+        o["home_xg"] = round(home_xg, 2)
+        o["away_xg"] = round(away_xg, 2)
+        o["total_xg"] = round(total_xg, 2)
+        o["draw_trap"] = draw_trap
+        o["winner_team"] = o.get("winner_team", winner)
+        o["loser_team"] = loser
+
+    return options
