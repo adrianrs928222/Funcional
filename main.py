@@ -1313,3 +1313,358 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
         o["loser_team"] = loser
 
     return options
+# =========================================================
+# EXPLICACIONES
+# =========================================================
+
+def tipster_explanation(
+    option: Dict[str, Any],
+    home: str,
+    away: str,
+    league: str,
+    bookmaker_note: str,
+    market_note: str,
+) -> str:
+    pick_type = option["pick_type"]
+    winner = option.get("winner_team", home)
+    total_xg = option.get("total_xg", 2.4)
+    draw_trap = option.get("draw_trap", False)
+    cards_team = option.get("cards_team", "")
+    cards_line = option.get("cards_line", 1.5)
+
+    if pick_type == "winner":
+        base = (
+            f"Me quedo con {option['pick']}. {winner} llega con mejor escenario competitivo para sacar "
+            f"el partido adelante y tiene argumentos para imponer su plan en los momentos clave."
+        )
+        if draw_trap:
+            base += " Aun así no es un cruce completamente limpio y por eso la confianza no se dispara."
+        return f"{base} {market_note} {bookmaker_note}".strip()
+
+    if pick_type == "double_chance":
+        return (
+            f"Veo más sólido cubrir con {option['pick']}. El partido no parece lo bastante limpio como para "
+            f"ir con un ganador puro, así que esta vía protege mejor el guion más probable del encuentro. "
+            f"{market_note} {bookmaker_note}"
+        ).strip()
+
+    if pick_type == "over_2_5":
+        return (
+            f"Me gusta la línea de más de 2.5 goles. El cruce apunta a ritmo, tramos abiertos y opciones "
+            f"reales para que el marcador supere esa barrera. {market_note} {bookmaker_note}"
+        ).strip()
+
+    if pick_type == "under_2_5":
+        return (
+            f"Prefiero el menos de 2.5 goles. No veo un partido demasiado roto y el contexto invita a pensar "
+            f"en un choque más contenido de lo que suele marcar la intuición inicial. {market_note} {bookmaker_note}"
+        ).strip()
+
+    if pick_type == "under_3_5":
+        return (
+            f"El menos de 3.5 goles me parece una vía muy sólida. Incluso si el partido tiene momentos de ida "
+            f"y vuelta, no apunta a un intercambio tan extremo como para irse a un marcador descontrolado. "
+            f"{market_note} {bookmaker_note}"
+        ).strip()
+
+    if pick_type == "btts_yes":
+        return (
+            f"Veo valor en el ambos marcan. Hay argumentos ofensivos en las dos partes y el cruce puede dejar "
+            f"espacios suficientes como para que ambos equipos encuentren portería. {market_note} {bookmaker_note}"
+        ).strip()
+
+    if pick_type == "btts_no":
+        return (
+            f"Me cuadra más el ambos no marcan. El partido tiene rasgos de control, fases cerradas o un guion "
+            f"en el que una de las dos partes puede quedarse corta en producción ofensiva. {market_note} {bookmaker_note}"
+        ).strip()
+
+    if pick_type == "team_cards":
+        return (
+            f"Me gusta {option['pick']}. {cards_team} es el lado que más opciones tiene de entrar en faltas tácticas, "
+            f"duelos exigentes y acciones de corte, así que superar la línea de {cards_line} tarjetas tiene sentido. "
+            f"{market_note} {bookmaker_note}"
+        ).strip()
+
+    return f"{option['pick']} {market_note} {bookmaker_note}".strip()
+
+
+# =========================================================
+# SELECCIÓN DEL MEJOR MERCADO POR PARTIDO
+# =========================================================
+
+def enrich_option_with_market(match: Dict[str, Any], option: Dict[str, Any], odds_index: Dict[Tuple[str, str, str], Dict[str, Any]]) -> Dict[str, Any]:
+    home = match["home_team"]
+    away = match["away_team"]
+    league = match["league"]
+
+    direct_key = (
+        simplify_team_name(home),
+        simplify_team_name(away),
+        normalize_text(league),
+    )
+    reverse_key = (
+        simplify_team_name(away),
+        simplify_team_name(home),
+        normalize_text(league),
+    )
+
+    odds_data = odds_index.get(direct_key) or odds_index.get(reverse_key)
+
+    bookmaker = None
+    bookmaker_market = None
+    bookmaker_odds = None
+    bookmaker_note = ""
+    market_note = ""
+
+    # Solo usamos mercado real para ganador si existe.
+    if option["pick_type"] == "winner" and odds_data:
+        bookmaker = odds_data.get("bookmaker")
+        bookmaker_market = odds_data.get("market")
+
+        winner_team = option.get("winner_team")
+        if winner_team == home:
+            bookmaker_odds = odds_data.get("home")
+        elif winner_team == away:
+            bookmaker_odds = odds_data.get("away")
+
+        adjusted_conf, market_note = market_read_adjustment(bookmaker_odds, option["confidence"])
+        option["confidence"] = adjusted_conf
+
+        if bookmaker_odds:
+            bookmaker_note = "La cuota disponible respalda bastante bien esta lectura del partido."
+
+    # Para otros mercados, si no hay odds reales específicas, usamos odds internas consistentes.
+    if bookmaker_odds is None:
+        bookmaker_odds = safe_odds_from_confidence(option["confidence"], option["pick_type"])
+
+    value = calculate_value(option["confidence"], bookmaker_odds)
+    band = confidence_band(option["confidence"])
+
+    explanation = tipster_explanation(
+        option,
+        home,
+        away,
+        league,
+        bookmaker_note,
+        market_note,
+    )
+
+    enriched = {
+        "id": match["id"],
+        "match": match["match"],
+        "league": league,
+        "time_local": match["dt_local"].strftime("%d/%m %H:%M"),
+        "kickoff_iso": match["dt_local"].isoformat(),
+        "pick": option["pick"],
+        "pick_type": option["pick_type"],
+        "confidence": int(option["confidence"]),
+        "confidence_band": band,
+        "odds_estimate": round(bookmaker_odds, 2) if bookmaker_odds is not None else None,
+        "pick_winner": option.get("winner_team"),
+        "btts": "Sí" if option["pick_type"] == "btts_yes" else ("No" if option["pick_type"] == "btts_no" else None),
+        "over_2_5": "Sí" if option["pick_type"] == "over_2_5" else ("No" if option["pick_type"] == "under_2_5" else None),
+        "cards": predict_cards(
+            league,
+            option.get("home_strength", stable_team_rating(home)),
+            option.get("away_strength", stable_team_rating(away)),
+            home,
+            away,
+        ),
+        "home_team": home,
+        "away_team": away,
+        "status": "pending",
+        "score_line": "",
+        "tipster_explanation": explanation,
+        "source": match.get("source", "unknown"),
+        "bookmaker": bookmaker,
+        "bookmaker_market": bookmaker_market,
+        "model_confidence": value["model_prob"],
+        "book_confidence": value["book_prob"],
+        "value_edge": value["edge"],
+        "has_value": value["has_value"],
+        "stake": value["stake"],
+        "cards_team": option.get("cards_team"),
+        "cards_line": option.get("cards_line"),
+    }
+
+    return enriched
+
+
+def choose_best_option_for_match(match: Dict[str, Any], odds_index: Dict[Tuple[str, str, str], Dict[str, Any]]) -> Dict[str, Any]:
+    options = build_market_options(match)
+    enriched_options = [enrich_option_with_market(match, dict(o), odds_index) for o in options]
+
+    # prioridad: value + confianza, pero si no hay value suficiente se queda con el mejor conservador
+    enriched_options.sort(
+        key=lambda x: (
+            1 if x.get("has_value") else 0,
+            x.get("confidence", 0),
+            x.get("stake", 0),
+        ),
+        reverse=True,
+    )
+
+    return enriched_options[0]
+
+
+# =========================================================
+# BUILD PICKS / SIEMPRE CON PICKS
+# =========================================================
+
+def build_picks() -> List[Dict[str, Any]]:
+    matches = get_real_matches()
+    odds_index = fetch_live_odds_index()
+
+    picks = [choose_best_option_for_match(m, odds_index) for m in matches]
+
+    # Primero intentamos picks con value real.
+    premium = [p for p in picks if p["confidence"] >= MIN_CONFIDENCE and p.get("has_value")]
+
+    # Si no llegamos al mínimo, completamos con picks conservadores.
+    if len(premium) < MIN_PICKS_ALWAYS:
+        backup = [p for p in picks if p not in premium]
+        backup.sort(
+            key=lambda x: (
+                x.get("confidence", 0),
+                x.get("stake", 0),
+            ),
+            reverse=True,
+        )
+        need = MIN_PICKS_ALWAYS - len(premium)
+        premium.extend(backup[:need])
+
+    premium.sort(
+        key=lambda x: (
+            x.get("confidence", 0),
+            x.get("stake", 0),
+            x.get("odds_estimate", 0) or 0,
+        ),
+        reverse=True,
+    )
+
+    return premium[:MAX_PICKS]
+
+
+# =========================================================
+# COMBINADA INTELIGENTE
+# =========================================================
+
+def combo_market_priority(pick: Dict[str, Any]) -> int:
+    pick_type = pick.get("pick_type")
+
+    # prioridad a mercados más seguros para combinada
+    if pick_type == "double_chance":
+        return 5
+    if pick_type == "under_3_5":
+        return 4
+    if pick_type == "team_cards":
+        return 3
+    if pick_type in {"btts_no", "under_2_5"}:
+        return 2
+    if pick_type in {"winner", "over_2_5", "btts_yes"}:
+        return 1
+    return 0
+
+
+def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not picks:
+        return {"size": 0, "estimated_total_odds": None, "confidence": 0, "picks": []}
+
+    ordered = sorted(
+        picks,
+        key=lambda x: (
+            combo_market_priority(x),
+            x.get("confidence", 0),
+            x.get("stake", 0),
+        ),
+        reverse=True,
+    )
+
+    combo: List[Dict[str, Any]] = []
+    used_matches = set()
+
+    for p in ordered:
+        if p["match"] in used_matches:
+            continue
+        combo.append(p)
+        used_matches.add(p["match"])
+        if len(combo) == 3:
+            break
+
+    if len(combo) < 2:
+        return {"size": len(combo), "estimated_total_odds": None, "confidence": 0, "picks": combo}
+
+    total_odds = 1.0
+    valid = True
+    for p in combo:
+        if p.get("odds_estimate") is None:
+            valid = False
+            break
+        total_odds *= p["odds_estimate"]
+
+    return {
+        "size": len(combo),
+        "estimated_total_odds": round(total_odds, 2) if valid else None,
+        "confidence": int(sum(p["confidence"] for p in combo) / len(combo)),
+        "picks": combo,
+    }
+
+
+# =========================================================
+# GROUPS
+# =========================================================
+
+def group_picks(picks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    return {
+        "alta": [p for p in picks if p["confidence"] >= 80],
+        "media": [p for p in picks if 72 <= p["confidence"] < 80],
+        "intermedia": [p for p in picks if p["confidence"] < 72],
+    }
+
+
+# =========================================================
+# RESULT EVALUATION
+# =========================================================
+
+def evaluate_pick_result(pick: Dict[str, Any], home_goals: int, away_goals: int) -> str:
+    pick_type = pick.get("pick_type")
+    selected_pick = pick.get("pick", "")
+
+    if pick_type == "winner":
+        if home_goals > away_goals and selected_pick == f"Gana {pick.get('home_team')}":
+            return "won"
+        if away_goals > home_goals and selected_pick == f"Gana {pick.get('away_team')}":
+            return "won"
+        return "lost"
+
+    if pick_type == "double_chance":
+        home = pick.get("home_team")
+        away = pick.get("away_team")
+
+        if selected_pick == f"1X {home}":
+            return "won" if home_goals >= away_goals else "lost"
+        if selected_pick == f"X2 {away}":
+            return "won" if away_goals >= home_goals else "lost"
+        return "lost"
+
+    if pick_type == "over_2_5":
+        return "won" if (home_goals + away_goals) > 2 else "lost"
+
+    if pick_type == "under_2_5":
+        return "won" if (home_goals + away_goals) < 3 else "lost"
+
+    if pick_type == "under_3_5":
+        return "won" if (home_goals + away_goals) < 4 else "lost"
+
+    if pick_type == "btts_yes":
+        return "won" if home_goals > 0 and away_goals > 0 else "lost"
+
+    if pick_type == "btts_no":
+        return "won" if home_goals == 0 or away_goals == 0 else "lost"
+
+    if pick_type == "team_cards":
+        # si no tenemos tarjetas reales por equipo todavía, dejamos pendiente
+        return "pending"
+
+    return "pending"
