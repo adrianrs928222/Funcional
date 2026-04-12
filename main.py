@@ -1059,3 +1059,234 @@ def get_real_matches() -> List[Dict[str, Any]]:
     unique = list(dedup.values())
     unique.sort(key=lambda x: x["dt_local"])
     return unique[:MAX_PICKS]
+# =========================================================
+# PICK MODEL (MEJORADO PRO)
+# =========================================================
+
+def is_draw_likely(home_strength: float, away_strength: float) -> bool:
+    return abs(home_strength - away_strength) < 5.5
+
+
+def adjust_confidence(base_conf: int, home: str, away: str, diff: float) -> int:
+    conf = base_conf
+
+    # anti-empates
+    if abs(diff) < 6:
+        conf -= 8
+
+    # equipos defensivos
+    defensive = ["atletico", "getafe", "osasuna"]
+    if any(x in home.lower() for x in defensive) or any(x in away.lower() for x in defensive):
+        conf -= 6
+
+    return int(max(65, min(conf, 92)))
+
+
+def implied_probability(odds: float) -> float:
+    if not odds or odds <= 1:
+        return None
+    return round(100 / odds, 1)
+
+
+def calculate_value(conf: int, odds: float):
+    if not odds:
+        return {
+            "model_prob": None,
+            "book_prob": None,
+            "edge": None,
+            "has_value": False,
+            "stake": 0,
+        }
+
+    model = conf
+    book = implied_probability(odds)
+    edge = round(model - book, 1)
+
+    stake = 0
+    if edge > 8:
+        stake = 5
+    elif edge > 5:
+        stake = 3
+    elif edge > 2:
+        stake = 2
+
+    return {
+        "model_prob": model,
+        "book_prob": book,
+        "edge": edge,
+        "has_value": edge > 2,
+        "stake": stake,
+    }
+
+
+def build_pick(match, odds_index):
+    home = match["home_team"]
+    away = match["away_team"]
+    league = match["league"]
+
+    home_strength = stable_team_rating(home) + 3
+    away_strength = stable_team_rating(away)
+
+    diff = home_strength - away_strength
+    abs_diff = abs(diff)
+
+    winner = home if diff >= 0 else away
+
+    base_conf = 70 + min(abs_diff * 1.6, 18)
+    confidence = adjust_confidence(base_conf, home, away, diff)
+
+    # odds lookup
+    odds_data = odds_index.get((home.lower(), away.lower(), league.lower()))
+    odds = None
+
+    if odds_data:
+        odds = odds_data.get("home") if winner == home else odds_data.get("away")
+
+        implied = implied_probability(odds)
+        if implied:
+            confidence = int((confidence * 0.65) + (implied * 0.35))
+
+    # fallback si no hay odds
+    if not odds:
+        odds = round(1.60 + (100 - confidence) * 0.01, 2)
+
+    value = calculate_value(confidence, odds)
+
+    if confidence >= 80:
+        band = "alta"
+    elif confidence >= 72:
+        band = "media"
+    else:
+        band = "intermedia"
+
+    return {
+        "id": match["id"],
+        "match": match["match"],
+        "league": league,
+        "time_local": match["dt_local"].strftime("%d/%m %H:%M"),
+        "kickoff_iso": match["dt_local"].isoformat(),
+        "pick": f"Gana {winner}",
+        "pick_type": "winner",
+        "confidence": confidence,
+        "confidence_band": band,
+        "odds_estimate": odds,
+        "pick_winner": winner,
+        "status": "pending",
+        "home_team": home,
+        "away_team": away,
+        "model_confidence": value["model_prob"],
+        "book_confidence": value["book_prob"],
+        "value_edge": value["edge"],
+        "has_value": value["has_value"],
+        "stake": value["stake"],
+    }
+
+
+def build_picks():
+    matches = get_real_matches()
+    odds_index = fetch_live_odds_index()
+
+    picks = [build_pick(m, odds_index) for m in matches]
+
+    picks = [p for p in picks if p["confidence"] >= 70]
+
+    picks.sort(key=lambda x: x["confidence"], reverse=True)
+    return picks[:20]
+
+
+# =========================================================
+# HISTORY FIX (FUNCIONA 100%)
+# =========================================================
+
+def update_history_finished_matches(history):
+    results = get_finished_scores_football_data() + get_finished_scores_sportsdb()
+
+    def match_ok(p, r):
+        if normalize_text(p["league"]) != normalize_text(r["league"]):
+            return False
+
+        if simplify_team_name(p["home_team"]) != simplify_team_name(r["home_team"]):
+            return False
+
+        if simplify_team_name(p["away_team"]) != simplify_team_name(r["away_team"]):
+            return False
+
+        try:
+            return datetime.fromisoformat(p["kickoff_iso"]).date() == datetime.fromisoformat(r["kickoff_iso"]).date()
+        except:
+            return True
+
+    for day in history.get("days", {}).values():
+        for pick in day.get("picks", []):
+            if pick["status"] != "pending":
+                continue
+
+            for r in results:
+                if match_ok(pick, r):
+                    pick["status"] = evaluate_pick_result(pick, r["home_goals"], r["away_goals"])
+                    pick["score_line"] = r["score_line"]
+                    break
+
+    return refresh_history_stats(history)
+
+
+# =========================================================
+# DASHBOARD REAL
+# =========================================================
+
+def compute_dashboard_stats(history):
+    won = lost = pending = total = 0
+    profit = 0
+
+    for day in history.get("days", {}).values():
+        for p in day.get("picks", []):
+            total += 1
+
+            if p["status"] == "pending":
+                pending += 1
+                continue
+
+            stake = p.get("stake", 0)
+            odds = p.get("odds_estimate", 1.8)
+
+            if p["status"] == "won":
+                won += 1
+                profit += (odds - 1) * stake
+            else:
+                lost += 1
+                profit -= stake
+
+    resolved = won + lost
+
+    return {
+        "hits": f"{won}/{resolved}" if resolved else "0/0",
+        "effectiveness": round((won / resolved) * 100, 1) if resolved else 0,
+        "profit": round(profit, 2),
+        "total_picks": total,
+        "pending": pending,
+    }
+
+
+# =========================================================
+# PAYLOAD
+# =========================================================
+
+def build_payload():
+    picks = build_picks()
+
+    history = read_json(HISTORY_FILE)
+    history = merge_today_history(history, picks)
+    history = update_history_finished_matches(history)
+
+    stats = compute_dashboard_stats(history)
+
+    write_json(HISTORY_FILE, history)
+
+    return {
+        "generated_at": now_local().isoformat(),
+        "count": len(picks),
+        "picks": picks,
+        "groups": group_picks(picks),
+        "combo_of_day": build_combo(picks),
+        "dashboard_stats": stats,
+    }
