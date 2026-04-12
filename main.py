@@ -1,7 +1,7 @@
 import json
-import math
 import os
 import unicodedata
+import hashlib
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -41,7 +41,7 @@ CACHE_REFRESH_MINUTES = 15
 MAX_PICKS = 20
 MAX_HISTORY_DAYS = 30
 API_COOLDOWN_MINUTES = 10
-MIN_CONFIDENCE = 68
+MIN_CONFIDENCE = 70
 HISTORY_PAGE_SIZE = 12
 
 API_PRIORITY = ["api_football", "football_data", "allsports", "sportsdb"]
@@ -250,7 +250,7 @@ def normalize_text(v: Optional[str]) -> str:
 
 def strip_accents(text: str) -> str:
     return "".join(
-        c for c in unicodedata.normalize("NFD", text)
+        c for c in unicodedata.normalize("NFD", text or "")
         if unicodedata.category(c) != "Mn"
     )
 
@@ -318,30 +318,12 @@ def team_names_match(a: str, b: str) -> bool:
     return len(common) >= min(2, len(a_tokens), len(b_tokens))
 
 
-def cache_is_valid(cache: Dict[str, Any]) -> bool:
-    if not cache:
-        return False
-
-    generated_at = cache.get("generated_at")
-    if not generated_at:
-        return False
-
-    try:
-        dt = datetime.fromisoformat(generated_at)
-    except Exception:
-        return False
-
-    if dt.tzinfo is None:
-        dt = TZ.localize(dt)
-
-    age = now_local() - dt.astimezone(TZ)
-    return age < timedelta(minutes=CACHE_REFRESH_MINUTES)
-
-
 def stable_team_rating(team_name: str) -> float:
     if team_name in TEAM_RATINGS:
         return TEAM_RATINGS[team_name]
-    h = abs(hash(team_name)) % 1000
+
+    digest = hashlib.md5(team_name.encode("utf-8")).hexdigest()
+    h = int(digest[:8], 16) % 1000
     return 68 + (h / 1000) * 14
 
 
@@ -362,6 +344,36 @@ def source_priority(source: str) -> int:
         return API_PRIORITY.index(source)
     except ValueError:
         return 999
+
+
+def parse_iso_to_local(iso_str: str) -> datetime:
+    dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = TZ.localize(dt)
+    return dt.astimezone(TZ)
+
+# =========================================================
+# CACHE
+# =========================================================
+
+def cache_is_valid(cache: Dict[str, Any]) -> bool:
+    if not cache:
+        return False
+
+    generated_at = cache.get("generated_at")
+    if not generated_at:
+        return False
+
+    try:
+        dt = datetime.fromisoformat(generated_at)
+    except Exception:
+        return False
+
+    if dt.tzinfo is None:
+        dt = TZ.localize(dt)
+
+    age = now_local() - dt.astimezone(TZ)
+    return age < timedelta(minutes=CACHE_REFRESH_MINUTES)
 
 # =========================================================
 # API STATE / COOLDOWN
@@ -424,7 +436,10 @@ def parse_sportsdb_datetime(date_str: Optional[str], time_str: Optional[str]) ->
     time_str = (time_str or "00:00:00").strip().replace("Z", "")
     if not date_str:
         raise ValueError("Missing dateEvent")
-    dt_utc = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.UTC)
+    dt_utc = datetime.strptime(
+        f"{date_str} {time_str}",
+        "%Y-%m-%d %H:%M:%S"
+    ).replace(tzinfo=pytz.UTC)
     return dt_utc.astimezone(TZ)
 
 
@@ -562,7 +577,7 @@ def get_api_football_matches() -> List[Dict[str, Any]]:
                     if not home or not away or not date_str:
                         continue
 
-                    dt_local = datetime.fromisoformat(date_str.replace("Z", "+00:00")).astimezone(TZ)
+                    dt_local = parse_iso_to_local(date_str)
                     if not (start <= dt_local <= end):
                         continue
 
@@ -618,10 +633,7 @@ def get_football_data_matches() -> List[Dict[str, Any]]:
         for code, league_name in FOOTBALL_DATA_LEAGUES.items():
             data = football_data_get(
                 f"/competitions/{code}/matches",
-                {
-                    "dateFrom": start_date,
-                    "dateTo": end_date,
-                },
+                {"dateFrom": start_date, "dateTo": end_date},
             )
 
             items = data.get("matches") or []
@@ -634,7 +646,7 @@ def get_football_data_matches() -> List[Dict[str, Any]]:
                     if not utc_date or not home or not away:
                         continue
 
-                    dt_local = datetime.fromisoformat(utc_date.replace("Z", "+00:00")).astimezone(TZ)
+                    dt_local = parse_iso_to_local(utc_date)
                     if not (start <= dt_local <= end):
                         continue
 
@@ -765,6 +777,7 @@ def select_best_h2h_market(bookmakers: List[Dict[str, Any]], home: str, away: st
     for book in bookmakers or []:
         title = book.get("title") or book.get("key") or "Bookmaker"
         markets = book.get("markets") or []
+
         for market in markets:
             if market.get("key") != "h2h":
                 continue
@@ -929,13 +942,13 @@ def get_adjustment_from_stats(league: str, pick_type: str) -> int:
 # VALUE BETTING
 # =========================================================
 
-def implied_probability(odds: float) -> float:
+def implied_probability(odds: float) -> Optional[float]:
     if not odds or odds <= 1:
-        return 0.0
-    return 1.0 / odds
+        return None
+    return round(100 / odds, 1)
 
 
-def calculate_value(confidence: int, odds: Optional[float]) -> Dict[str, Any]:
+def calculate_value(conf: int, odds: Optional[float]) -> Dict[str, Any]:
     if not odds:
         return {
             "model_prob": None,
@@ -945,84 +958,36 @@ def calculate_value(confidence: int, odds: Optional[float]) -> Dict[str, Any]:
             "stake": 0,
         }
 
-    model_prob = confidence / 100.0
-    book_prob = implied_probability(odds)
-    edge = model_prob - book_prob
+    book = implied_probability(odds)
+    if book is None:
+        return {
+            "model_prob": conf,
+            "book_prob": None,
+            "edge": None,
+            "has_value": False,
+            "stake": 0,
+        }
 
-    if edge >= 0.12:
+    edge = round(conf - book, 1)
+
+    stake = 0
+    if edge > 8:
         stake = 5
-    elif edge >= 0.08:
-        stake = 4
-    elif edge >= 0.05:
+    elif edge > 5:
         stake = 3
-    elif edge >= 0.03:
+    elif edge > 2:
         stake = 2
-    elif edge >= 0.015:
-        stake = 1
-    else:
-        stake = 0
-
-    has_value = edge >= 0.03
 
     return {
-        "model_prob": round(model_prob * 100, 1),
-        "book_prob": round(book_prob * 100, 1),
-        "edge": round(edge * 100, 2),
-        "has_value": has_value,
+        "model_prob": conf,
+        "book_prob": book,
+        "edge": edge,
+        "has_value": edge > 2,
         "stake": stake,
     }
 
-
-def compute_dashboard_stats(history: Dict[str, Any]) -> Dict[str, Any]:
-    won = 0
-    lost = 0
-    pending = 0
-    total = 0
-    profit = 0.0
-
-    for _, day in history.get("days", {}).items():
-        for pick in day.get("picks", []):
-            status = pick.get("status")
-
-            if status == "pending":
-                pending += 1
-                total += 1
-                continue
-
-            if status not in ["won", "lost"]:
-                continue
-
-            total += 1
-
-            if status == "won":
-                won += 1
-            else:
-                lost += 1
-
-            stake = float(pick.get("stake", 0) or 0)
-            odds = pick.get("odds_estimate")
-
-            if stake <= 0:
-                continue
-
-            if status == "won" and odds:
-                profit += (float(odds) - 1.0) * stake
-            elif status == "lost":
-                profit -= stake
-
-    resolved = won + lost
-    effectiveness = round((won / resolved) * 100, 1) if resolved > 0 else 0.0
-
-    return {
-        "hits": f"{won}/{resolved}" if resolved > 0 else "0/0",
-        "effectiveness": effectiveness,
-        "profit": round(profit, 2),
-        "total_picks": total,
-        "pending": pending,
-    }
-
 # =========================================================
-# MERGE / DEDUP
+# MERGE / DEDUP MATCHES
 # =========================================================
 
 def get_real_matches() -> List[Dict[str, Any]]:
@@ -1059,67 +1024,48 @@ def get_real_matches() -> List[Dict[str, Any]]:
     unique = list(dedup.values())
     unique.sort(key=lambda x: x["dt_local"])
     return unique[:MAX_PICKS]
+
 # =========================================================
-# PICK MODEL (MEJORADO PRO)
+# PICK MODEL
 # =========================================================
 
 def is_draw_likely(home_strength: float, away_strength: float) -> bool:
     return abs(home_strength - away_strength) < 5.5
 
 
-def adjust_confidence(base_conf: int, home: str, away: str, diff: float) -> int:
+def anti_draw_penalty(home: str, away: str, diff: float) -> int:
+    penalty = 0
+
+    home_s = simplify_team_name(home)
+    away_s = simplify_team_name(away)
+
+    if abs(diff) < 6:
+        penalty += 8
+
+    if home_s in DRAW_TRAP_TEAMS:
+        penalty += 4
+    if away_s in DRAW_TRAP_TEAMS:
+        penalty += 4
+
+    defensive_keywords = ["atletico", "getafe", "osasuna", "mallorca", "huesca", "burgos"]
+    if any(x in home_s for x in defensive_keywords):
+        penalty += 2
+    if any(x in away_s for x in defensive_keywords):
+        penalty += 2
+
+    return penalty
+
+
+def adjust_confidence(base_conf: float, home: str, away: str, diff: float, league: str, pick_type: str) -> int:
     conf = base_conf
 
-    # anti-empates
-    if abs(diff) < 6:
-        conf -= 8
+    conf -= anti_draw_penalty(home, away, diff)
+    conf += get_adjustment_from_stats(league, pick_type)
 
-    # equipos defensivos
-    defensive = ["atletico", "getafe", "osasuna"]
-    if any(x in home.lower() for x in defensive) or any(x in away.lower() for x in defensive):
-        conf -= 6
-
-    return int(max(65, min(conf, 92)))
+    return int(max(65, min(round(conf), 92)))
 
 
-def implied_probability(odds: float) -> float:
-    if not odds or odds <= 1:
-        return None
-    return round(100 / odds, 1)
-
-
-def calculate_value(conf: int, odds: float):
-    if not odds:
-        return {
-            "model_prob": None,
-            "book_prob": None,
-            "edge": None,
-            "has_value": False,
-            "stake": 0,
-        }
-
-    model = conf
-    book = implied_probability(odds)
-    edge = round(model - book, 1)
-
-    stake = 0
-    if edge > 8:
-        stake = 5
-    elif edge > 5:
-        stake = 3
-    elif edge > 2:
-        stake = 2
-
-    return {
-        "model_prob": model,
-        "book_prob": book,
-        "edge": edge,
-        "has_value": edge > 2,
-        "stake": stake,
-    }
-
-
-def build_pick(match, odds_index):
+def build_pick(match: Dict[str, Any], odds_index: Dict[Tuple[str, str, str], Dict[str, Any]]) -> Dict[str, Any]:
     home = match["home_team"]
     away = match["away_team"]
     league = match["league"]
@@ -1129,24 +1075,33 @@ def build_pick(match, odds_index):
 
     diff = home_strength - away_strength
     abs_diff = abs(diff)
-
     winner = home if diff >= 0 else away
 
     base_conf = 70 + min(abs_diff * 1.6, 18)
-    confidence = adjust_confidence(base_conf, home, away, diff)
+    confidence = adjust_confidence(base_conf, home, away, diff, league, "winner")
 
-    # odds lookup
-    odds_data = odds_index.get((home.lower(), away.lower(), league.lower()))
+    odds_data = odds_index.get((
+        simplify_team_name(home),
+        simplify_team_name(away),
+        normalize_text(league),
+    ))
+
     odds = None
+    bookmaker = None
+    market_name = None
+    market_draw = None
 
     if odds_data:
         odds = odds_data.get("home") if winner == home else odds_data.get("away")
+        bookmaker = odds_data.get("bookmaker")
+        market_name = odds_data.get("market")
+        market_draw = odds_data.get("draw")
 
         implied = implied_probability(odds)
-        if implied:
+        if implied is not None:
             confidence = int((confidence * 0.65) + (implied * 0.35))
+            confidence = max(65, min(confidence, 92))
 
-    # fallback si no hay odds
     if not odds:
         odds = round(1.60 + (100 - confidence) * 0.01, 2)
 
@@ -1160,7 +1115,7 @@ def build_pick(match, odds_index):
         band = "intermedia"
 
     return {
-        "id": match["id"],
+        "id": str(match["id"]),
         "match": match["match"],
         "league": league,
         "time_local": match["dt_local"].strftime("%d/%m %H:%M"),
@@ -1179,114 +1134,18 @@ def build_pick(match, odds_index):
         "value_edge": value["edge"],
         "has_value": value["has_value"],
         "stake": value["stake"],
+        "bookmaker": bookmaker,
+        "market_name": market_name,
+        "market_draw_odds": market_draw,
+        "source": match.get("source"),
     }
 
 
-def build_picks():
+def build_picks() -> List[Dict[str, Any]]:
     matches = get_real_matches()
     odds_index = fetch_live_odds_index()
 
     picks = [build_pick(m, odds_index) for m in matches]
-
-    picks = [p for p in picks if p["confidence"] >= 70]
-
-    picks.sort(key=lambda x: x["confidence"], reverse=True)
-    return picks[:20]
-
-
-# =========================================================
-# HISTORY FIX (FUNCIONA 100%)
-# =========================================================
-
-def update_history_finished_matches(history):
-    results = get_finished_scores_football_data() + get_finished_scores_sportsdb()
-
-    def match_ok(p, r):
-        if normalize_text(p["league"]) != normalize_text(r["league"]):
-            return False
-
-        if simplify_team_name(p["home_team"]) != simplify_team_name(r["home_team"]):
-            return False
-
-        if simplify_team_name(p["away_team"]) != simplify_team_name(r["away_team"]):
-            return False
-
-        try:
-            return datetime.fromisoformat(p["kickoff_iso"]).date() == datetime.fromisoformat(r["kickoff_iso"]).date()
-        except:
-            return True
-
-    for day in history.get("days", {}).values():
-        for pick in day.get("picks", []):
-            if pick["status"] != "pending":
-                continue
-
-            for r in results:
-                if match_ok(pick, r):
-                    pick["status"] = evaluate_pick_result(pick, r["home_goals"], r["away_goals"])
-                    pick["score_line"] = r["score_line"]
-                    break
-
-    return refresh_history_stats(history)
-
-
-# =========================================================
-# DASHBOARD REAL
-# =========================================================
-
-def compute_dashboard_stats(history):
-    won = lost = pending = total = 0
-    profit = 0
-
-    for day in history.get("days", {}).values():
-        for p in day.get("picks", []):
-            total += 1
-
-            if p["status"] == "pending":
-                pending += 1
-                continue
-
-            stake = p.get("stake", 0)
-            odds = p.get("odds_estimate", 1.8)
-
-            if p["status"] == "won":
-                won += 1
-                profit += (odds - 1) * stake
-            else:
-                lost += 1
-                profit -= stake
-
-    resolved = won + lost
-
-    return {
-        "hits": f"{won}/{resolved}" if resolved else "0/0",
-        "effectiveness": round((won / resolved) * 100, 1) if resolved else 0,
-        "profit": round(profit, 2),
-        "total_picks": total,
-        "pending": pending,
-    }
-
-
-# =========================================================
-# PAYLOAD
-# =========================================================
-
-def build_payload():
-    picks = build_picks()
-
-    history = read_json(HISTORY_FILE)
-    history = merge_today_history(history, picks)
-    history = update_history_finished_matches(history)
-
-    stats = compute_dashboard_stats(history)
-
-    write_json(HISTORY_FILE, history)
-
-    return {
-        "generated_at": now_local().isoformat(),
-        "count": len(picks),
-        "picks": picks,
-        "groups": group_picks(picks),
-        "combo_of_day": build_combo(picks),
-        "dashboard_stats": stats,
-    }
+    picks = [p for p in picks if p["confidence"] >= MIN_CONFIDENCE]
+    picks.sort(key=lambda x: (x["confidence"], x.get("value_edge") or -999), reverse=True)
+    return picks[:MAX_PICKS]
