@@ -1798,29 +1798,6 @@ def build_picks() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         reverse=True,
     )
 
-    if len(picks) < TARGET_PICKS:
-        backup = []
-        for item in catalog:
-            best = best_market_from_catalog_item(item)
-            if best:
-                backup.append(best)
-
-        backup.sort(
-            key=lambda x: (
-                x.get("score", 0),
-                x.get("confidence", 0),
-            ),
-            reverse=True,
-        )
-
-        used_matches = {p["match"] for p in picks}
-        for b in backup:
-            if len(picks) >= TARGET_PICKS:
-                break
-            if b["match"] in used_matches:
-                continue
-            picks.append(b)
-
     return picks[:MAX_PICKS], catalog
 
 
