@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 # =========================================================
-# TIPSTER TIPS PRO - CONFIG
+# CONFIG
 # =========================================================
 
 TZ = pytz.timezone("Europe/Madrid")
@@ -59,11 +59,13 @@ SPORTSDB_LEAGUES = {
     "4328": "LaLiga",
     "4400": "Segunda División",
     "4480": "Champions League",
+    "4429": "Mundial",
 }
 
 API_FOOTBALL_LEAGUES = {
     140: "LaLiga",
     2: "Champions League",
+    1: "Mundial",
 }
 
 FOOTBALL_DATA_LEAGUES = {
@@ -72,7 +74,7 @@ FOOTBALL_DATA_LEAGUES = {
     "CL": "Champions League",
 }
 
-SEASON_CANDIDATES_SPORTSDB = ["2025-2026", "2024-2025"]
+SEASON_CANDIDATES_SPORTSDB = ["2025-2026", "2024-2025", "2026"]
 
 ODDS_SPORT_KEYS = {
     "LaLiga": "soccer_spain_la_liga",
@@ -88,6 +90,7 @@ TRACKABLE_MARKETS = {
     "under_3_5",
     "btts_yes",
     "btts_no",
+    "bet_builder",
 }
 
 SAFE_COMBO_MARKETS = {
@@ -120,6 +123,7 @@ TEAM_RATINGS = {
     "Las Palmas": 72,
     "Alaves": 73,
     "Alavés": 73,
+
     "Almería": 78,
     "Almeria": 78,
     "Granada": 77,
@@ -144,6 +148,7 @@ TEAM_RATINGS = {
     "Córdoba": 70,
     "Cordoba": 70,
     "Deportivo La Coruña": 72,
+
     "Manchester City": 94,
     "Arsenal": 91,
     "Liverpool": 91,
@@ -161,6 +166,36 @@ TEAM_RATINGS = {
     "RB Leipzig": 84,
     "Sporting CP": 83,
     "Sporting Lisbon": 83,
+
+    "Spain": 90,
+    "España": 90,
+    "France": 92,
+    "Francia": 92,
+    "Brazil": 91,
+    "Brasil": 91,
+    "Argentina": 91,
+    "England": 90,
+    "Inglaterra": 90,
+    "Portugal": 89,
+    "Germany": 88,
+    "Alemania": 88,
+    "Netherlands": 88,
+    "Países Bajos": 88,
+    "Italy": 87,
+    "Italia": 87,
+    "Uruguay": 84,
+    "Belgium": 84,
+    "Bélgica": 84,
+    "Croatia": 83,
+    "Croacia": 83,
+    "USA": 80,
+    "United States": 80,
+    "Mexico": 80,
+    "México": 80,
+    "Morocco": 82,
+    "Marruecos": 82,
+    "Japan": 79,
+    "Japón": 79,
 }
 
 DRAW_TRAP_TEAMS = {
@@ -191,7 +226,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 # =========================================================
 # BASIC HELPERS
 # =========================================================
@@ -268,6 +302,8 @@ def simplify_team_name(name: str) -> str:
         "elche cf": "elche",
         "malaga cf": "malaga",
         "cordoba cf": "cordoba",
+        "united states": "usa",
+        "estados unidos": "usa",
     }
 
     for old, new in replacements.items():
@@ -393,10 +429,12 @@ def league_team_sanity_check(league: str, home: str, away: str) -> bool:
     if league_n == "segunda división":
         return home_s in segunda_teams and away_s in segunda_teams
 
-    if league_n == "champions league":
+    if league_n in {"champions league", "mundial"}:
         return True
 
     return True
+
+
 # =========================================================
 # API STATE
 # =========================================================
@@ -446,7 +484,6 @@ def api_is_available(api_name: str) -> bool:
         dt = TZ.localize(dt)
 
     return now_local() >= dt.astimezone(TZ)
-
 # =========================================================
 # SPORTSDB
 # =========================================================
@@ -555,6 +592,7 @@ def get_sportsdb_matches() -> List[Dict[str, Any]]:
         set_api_cooldown("sportsdb", parse_requests_error(e))
         return []
 
+
 # =========================================================
 # API-FOOTBALL
 # =========================================================
@@ -640,6 +678,7 @@ def get_api_football_matches() -> List[Dict[str, Any]]:
         set_api_cooldown("api_football", parse_requests_error(e))
         return []
 
+
 # =========================================================
 # FOOTBALL-DATA
 # =========================================================
@@ -716,7 +755,6 @@ def get_football_data_matches() -> List[Dict[str, Any]]:
     except Exception as e:
         set_api_cooldown("football_data", parse_requests_error(e))
         return []
-
 # =========================================================
 # ODDS API
 # =========================================================
@@ -835,8 +873,10 @@ def fetch_live_odds_index() -> Dict[Tuple[str, str, str], Dict[str, Any]]:
     except Exception as e:
         set_api_cooldown("odds_api", parse_requests_error(e))
         return {}
+
+
 # =========================================================
-# STATS / LEARNING LIGHT
+# LIGHT LEARNING
 # =========================================================
 
 def load_model_stats() -> Dict[str, Any]:
@@ -907,6 +947,7 @@ def get_adjustment_from_stats(league: str, pick_type: str) -> int:
 def refresh_model_stats_from_history(history: Dict[str, Any]) -> None:
     save_model_stats(rebuild_model_stats_from_history(history))
 
+
 # =========================================================
 # MATCH MERGE
 # =========================================================
@@ -948,8 +989,9 @@ def get_real_matches() -> List[Dict[str, Any]]:
     unique.sort(key=lambda x: x["dt_local"])
     return unique[:60]
 
+
 # =========================================================
-# MARKET LOGIC
+# MARKET HELPERS
 # =========================================================
 
 def implied_probability(odds: float) -> Optional[float]:
@@ -1066,13 +1108,16 @@ def market_reliability_bonus(pick_type: str) -> int:
     if pick_type == "winner":
         return -4
     return 0
-
+# =========================================================
+# MARKET BUILDERS
+# =========================================================
 
 def predict_cards(league: str, home_strength: float, away_strength: float, home: str, away: str) -> Dict[str, int]:
     base_cards = {
         "LaLiga": 5,
         "Segunda División": 6,
         "Champions League": 4,
+        "Mundial": 4,
     }
 
     total = base_cards.get(league, 5)
@@ -1100,12 +1145,12 @@ def team_cards_market(home: str, away: str, home_strength: float, away_strength:
     if diff >= 4:
         card_team = away
         card_team_s = away_s
-        line = 1.5 if league == "Champions League" else 2.5
+        line = 1.5 if league in {"Champions League", "Mundial"} else 2.5
         conf = 72 + min(abs_diff * 1.2, 10)
     elif diff <= -4:
         card_team = home
         card_team_s = home_s
-        line = 1.5 if league == "Champions League" else 2.5
+        line = 1.5 if league in {"Champions League", "Mundial"} else 2.5
         conf = 72 + min(abs_diff * 1.2, 10)
     else:
         if away_s in AGGRESSIVE_CARD_TEAMS:
@@ -1206,6 +1251,7 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
     home = match["home_team"]
     away = match["away_team"]
     league = match["league"]
+    is_world_cup = normalize_text(league) == "mundial"
 
     home_strength = stable_team_rating(home) + 3.2
     away_strength = stable_team_rating(away)
@@ -1219,6 +1265,11 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
     home_xg = max(0.55, min(1.20 + diff * 0.035, 2.80))
     away_xg = max(0.40, min(1.00 - diff * 0.022, 2.30))
     total_xg = home_xg + away_xg
+
+    if is_world_cup:
+        home_xg *= 0.92
+        away_xg *= 0.92
+        total_xg *= 0.92
 
     winner = home if home_strength >= away_strength else away
     loser = away if winner == home else home
@@ -1240,11 +1291,7 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
         "trackable": True,
     })
 
-    if diff >= 0:
-        dc_pick = f"1X {home}"
-    else:
-        dc_pick = f"X2 {away}"
-
+    dc_pick = f"1X {home}" if diff >= 0 else f"X2 {away}"
     dc_conf = 74 + min(abs_diff * 1.1, 10)
 
     if draw_trap:
@@ -1252,6 +1299,9 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     if abs_diff < 4:
         dc_conf += 4
+
+    if is_world_cup:
+        dc_conf += 2
 
     dc_conf += get_adjustment_from_stats(league, "double_chance")
 
@@ -1278,7 +1328,7 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
     options.append({
         "pick": "Más de 2.5 goles",
         "pick_type": "over_2_5",
-        "confidence": int(max(58, min(89, over_conf))),
+        "confidence": int(max(56, min(89, over_conf))),
         "trackable": True,
     })
 
@@ -1289,6 +1339,9 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     if draw_trap:
         under35_conf += 5
+
+    if is_world_cup:
+        under35_conf += 3
 
     under35_conf += get_adjustment_from_stats(league, "under_3_5")
 
@@ -1313,10 +1366,13 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
     if draw_trap:
         btts_yes_conf += 2
 
+    if is_world_cup:
+        btts_yes_conf -= 2
+
     btts_yes_conf += get_adjustment_from_stats(league, "btts_yes")
 
     options.append({
-        "pick": "Ambos marcan",
+        "pick": "Ambos marcan: Sí",
         "pick_type": "btts_yes",
         "confidence": int(max(56, min(87, btts_yes_conf))),
         "trackable": True,
@@ -1333,10 +1389,13 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
     if draw_trap:
         btts_no_conf += 3
 
+    if is_world_cup:
+        btts_no_conf += 2
+
     btts_no_conf += get_adjustment_from_stats(league, "btts_no")
 
     options.append({
-        "pick": "Ambos no marcan",
+        "pick": "Ambos marcan: No",
         "pick_type": "btts_no",
         "confidence": int(max(60, min(88, btts_no_conf))),
         "trackable": True,
@@ -1367,6 +1426,8 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
         o["loser_team"] = loser
 
     return options
+
+
 # =========================================================
 # ENRICH / BUILDER
 # =========================================================
@@ -1375,7 +1436,7 @@ def tipster_explanation(option: Dict[str, Any]) -> str:
     pick_type = option.get("pick_type")
 
     if pick_type == "winner":
-        return "Lectura principal del partido basada en diferencia competitiva, localía y riesgo de empate."
+        return "Lectura principal basada en diferencia competitiva, localía y riesgo de empate."
 
     if pick_type == "double_chance":
         return "Mercado protegido para cubrir empate y reducir riesgo."
@@ -1384,7 +1445,7 @@ def tipster_explanation(option: Dict[str, Any]) -> str:
         return "Lectura de partido con ritmo y opciones de superar la línea de goles."
 
     if pick_type == "under_3_5":
-        return "Mercado de control, útil para partidos que no apuntan a marcador descontrolado."
+        return "Mercado de control para partidos que no apuntan a marcador descontrolado."
 
     if pick_type == "btts_yes":
         return "Ambos equipos tienen argumentos para encontrar portería."
@@ -1491,8 +1552,6 @@ def enrich_option_with_market(
     }
 
     return enriched
-
-
 def build_all_markets_for_match(
     match: Dict[str, Any],
     odds_index: Dict[Tuple[str, str, str], Dict[str, Any]],
@@ -1687,22 +1746,6 @@ def build_bet_builder_for_match(
     }
 
 
-def best_market_from_catalog_item(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    markets = item.get("markets", [])
-    if not markets:
-        return None
-
-    markets.sort(
-        key=lambda x: (
-            x.get("score", 0),
-            x.get("confidence", 0),
-        ),
-        reverse=True,
-    )
-
-    return markets[0]
-
-
 def extract_simple_combo_candidates(match_catalog: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     candidates = []
     allowed = {"double_chance", "under_3_5", "btts_no"}
@@ -1729,6 +1772,53 @@ def extract_simple_combo_candidates(match_catalog: List[Dict[str, Any]]) -> List
     )
 
     return candidates
+
+
+def is_today_or_tomorrow_pick(pick: Dict[str, Any]) -> bool:
+    kickoff_iso = pick.get("kickoff_iso")
+
+    if not kickoff_iso:
+        return False
+
+    try:
+        dt = datetime.fromisoformat(kickoff_iso)
+    except Exception:
+        return False
+
+    if dt.tzinfo is None:
+        dt = TZ.localize(dt)
+
+    pick_date = dt.astimezone(TZ).date()
+    today = now_local().date()
+    tomorrow = today + timedelta(days=1)
+
+    return pick_date in {today, tomorrow}
+
+
+def get_premium_single_pick(
+    picks: List[Dict[str, Any]],
+    combo: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    combo_matches = {p.get("match") for p in combo.get("picks", [])}
+
+    candidates = [
+        p for p in picks
+        if p.get("match") not in combo_matches
+    ]
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda x: (
+            x.get("confidence", 0),
+            x.get("score", 0),
+            -abs(float(x.get("odds_estimate", 0) or 0) - 2.50),
+        ),
+        reverse=True,
+    )
+
+    return candidates[0]
 
 
 def build_picks() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -1807,16 +1897,16 @@ def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
     used_matches = set()
 
     for pick in combo_candidates:
-        if pick["match"] in used_matches:
+        if pick.get("match") in used_matches:
             continue
 
         combo.append(pick)
-        used_matches.add(pick["match"])
+        used_matches.add(pick.get("match"))
 
         if len(combo) == 3:
             break
 
-    if len(combo) < 2:
+    if len(combo) < 3:
         return {
             "size": len(combo),
             "estimated_total_odds": None,
@@ -1834,7 +1924,7 @@ def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
     )
 
     return {
-        "size": len(combo),
+        "size": 3,
         "estimated_total_odds": round(total_odds, 2),
         "confidence": confidence,
         "picks": combo,
@@ -1849,13 +1939,35 @@ def group_picks(picks: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
         "risky": [p for p in picks if p["tier"] == "risky"],
     }
 
-# =========================================================
-# HISTORY / DASHBOARD
-# =========================================================
 
 def evaluate_pick_result(pick: Dict[str, Any], home_goals: int, away_goals: int) -> str:
     pick_type = pick.get("pick_type")
     selected_pick = pick.get("pick", "")
+
+    if pick_type == "bet_builder":
+        legs = pick.get("legs") or []
+        if not legs:
+            return "pending"
+
+        for leg in legs:
+            leg_type = leg.get("pick_type")
+
+            if leg_type in {"team_cards", "team_score_first_half", "team_score_second_half"}:
+                return "pending"
+
+            leg_pick = dict(pick)
+            leg_pick["pick_type"] = leg_type
+            leg_pick["pick"] = leg.get("pick", "")
+
+            result = evaluate_pick_result(leg_pick, home_goals, away_goals)
+
+            if result == "lost":
+                return "lost"
+
+            if result != "won":
+                return "pending"
+
+        return "won"
 
     if pick_type == "winner":
         if home_goals > away_goals and selected_pick == f"Gana {pick.get('home_team')}":
@@ -1878,6 +1990,9 @@ def evaluate_pick_result(pick: Dict[str, Any], home_goals: int, away_goals: int)
 
     if pick_type == "over_2_5":
         return "won" if (home_goals + away_goals) > 2 else "lost"
+
+    if pick_type == "under_2_5":
+        return "won" if (home_goals + away_goals) < 3 else "lost"
 
     if pick_type == "under_3_5":
         return "won" if (home_goals + away_goals) < 4 else "lost"
@@ -2050,6 +2165,7 @@ def merge_today_history(history: Dict[str, Any], picks: List[Dict[str, Any]]) ->
             for field in [
                 "confidence", "confidence_band", "tier", "score", "odds_estimate",
                 "odds_source", "tipster_explanation", "source", "selections", "legs",
+                "cards",
             ]:
                 if field in p:
                     old[field] = p[field]
@@ -2118,9 +2234,6 @@ def compute_dashboard_stats(history: Dict[str, Any]) -> Dict[str, Any]:
         "pending": pending,
     }
 
-# =========================================================
-# PAYLOAD
-# =========================================================
 
 def build_payload() -> Dict[str, Any]:
     try:
@@ -2137,7 +2250,13 @@ def build_payload() -> Dict[str, Any]:
     refresh_model_stats_from_history(history)
     dashboard_stats = compute_dashboard_stats(history)
 
-    combo_pool = picks + extract_simple_combo_candidates(match_catalog)
+    combo_pool = [
+        p for p in (picks + extract_simple_combo_candidates(match_catalog))
+        if is_today_or_tomorrow_pick(p)
+    ]
+
+    combo = build_combo(combo_pool) if combo_pool else {}
+    premium_single = get_premium_single_pick(picks, combo) if picks else None
 
     payload = {
         "generated_at": now_local().isoformat(),
@@ -2146,7 +2265,8 @@ def build_payload() -> Dict[str, Any]:
         "count": len(picks),
         "picks": picks,
         "match_catalog": match_catalog,
-        "combo_of_day": build_combo(combo_pool) if combo_pool else {},
+        "combo_of_day": combo,
+        "premium_single": premium_single,
         "groups": group_picks(picks) if picks else {
             "premium": [],
             "strong": [],
@@ -2177,9 +2297,6 @@ def get_cached_or_refresh(force_refresh: bool = False) -> Dict[str, Any]:
 
     return build_payload()
 
-# =========================================================
-# ROUTES
-# =========================================================
 
 @app.get("/")
 def root() -> Dict[str, Any]:
@@ -2244,6 +2361,7 @@ def picks(force_refresh: bool = Query(False)) -> Dict[str, Any]:
             "picks": [],
             "match_catalog": [],
             "combo_of_day": {},
+            "premium_single": None,
             "groups": {
                 "premium": [],
                 "strong": [],
