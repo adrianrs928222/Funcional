@@ -11,10 +11,6 @@ import requests
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
-# =========================================================
-# CONFIG
-# =========================================================
-
 TZ = pytz.timezone("Europe/Madrid")
 
 SPORTSDB_API_KEY = os.getenv("SPORTSDB_API_KEY", "123").strip()
@@ -39,6 +35,7 @@ CACHE_REFRESH_MINUTES = 15
 
 MAX_PICKS = 10
 TARGET_PICKS = 10
+MIN_PREMIUM_PICKS = 4
 
 MIN_BUILDER_SELECTIONS = 2
 MAX_BUILDER_SELECTIONS = 6
@@ -56,15 +53,17 @@ HISTORY_PAGE_SIZE = 12
 API_PRIORITY = ["api_football", "football_data", "sportsdb"]
 
 SPORTSDB_LEAGUES = {
-    "4328": "LaLiga",
+    "4335": "LaLiga",
     "4400": "Segunda División",
     "4480": "Champions League",
+    "4328": "Premier League",
     "4429": "Mundial",
 }
 
 API_FOOTBALL_LEAGUES = {
     140: "LaLiga",
     2: "Champions League",
+    39: "Premier League",
     1: "Mundial",
 }
 
@@ -72,6 +71,7 @@ FOOTBALL_DATA_LEAGUES = {
     "PD": "LaLiga",
     "SD": "Segunda División",
     "CL": "Champions League",
+    "PL": "Premier League",
 }
 
 SEASON_CANDIDATES_SPORTSDB = ["2025-2026", "2024-2025", "2026"]
@@ -80,6 +80,7 @@ ODDS_SPORT_KEYS = {
     "LaLiga": "soccer_spain_la_liga",
     "Segunda División": "soccer_spain_segunda_division",
     "Champions League": "soccer_uefa_champs_league",
+    "Premier League": "soccer_epl",
 }
 
 TRACKABLE_MARKETS = {
@@ -101,13 +102,9 @@ SAFE_COMBO_MARKETS = {
 }
 
 TEAM_RATINGS = {
-    "Real Madrid": 93,
-    "Real Madrid CF": 93,
-    "Barcelona": 91,
-    "FC Barcelona": 91,
-    "Atletico Madrid": 87,
-    "Atlético Madrid": 87,
-    "Club Atlético de Madrid": 87,
+    "Real Madrid": 93, "Real Madrid CF": 93,
+    "Barcelona": 91, "FC Barcelona": 91,
+    "Atletico Madrid": 87, "Atlético Madrid": 87, "Club Atlético de Madrid": 87,
     "Athletic Club": 84,
     "Real Sociedad": 82,
     "Villarreal": 81,
@@ -124,16 +121,13 @@ TEAM_RATINGS = {
     "Alaves": 73,
     "Alavés": 73,
 
-    "Almería": 78,
-    "Almeria": 78,
+    "Almería": 78, "Almeria": 78,
     "Granada": 77,
-    "Cádiz": 76,
-    "Cadiz": 76,
+    "Cádiz": 76, "Cadiz": 76,
     "Levante": 76,
     "Real Oviedo": 74,
     "Real Zaragoza": 73,
-    "Sporting Gijón": 73,
-    "Sporting Gijon": 73,
+    "Sporting Gijón": 73, "Sporting Gijon": 73,
     "Eibar": 74,
     "Elche": 75,
     "Racing Santander": 73,
@@ -141,12 +135,9 @@ TEAM_RATINGS = {
     "Huesca": 71,
     "Burgos": 71,
     "Albacete": 71,
-    "Castellón": 70,
-    "Castellon": 70,
-    "Málaga": 72,
-    "Malaga": 72,
-    "Córdoba": 70,
-    "Cordoba": 70,
+    "Castellón": 70, "Castellon": 70,
+    "Málaga": 72, "Malaga": 72,
+    "Córdoba": 70, "Cordoba": 70,
     "Deportivo La Coruña": 72,
 
     "Manchester City": 94,
@@ -167,35 +158,49 @@ TEAM_RATINGS = {
     "Sporting CP": 83,
     "Sporting Lisbon": 83,
 
-    "Spain": 90,
-    "España": 90,
-    "France": 92,
-    "Francia": 92,
-    "Brazil": 91,
-    "Brasil": 91,
+    "Manchester United": 84,
+    "Chelsea": 84,
+    "Tottenham": 84,
+    "Tottenham Hotspur": 84,
+    "Newcastle": 83,
+    "Newcastle United": 83,
+    "Aston Villa": 83,
+    "Brighton": 80,
+    "Brighton & Hove Albion": 80,
+    "West Ham": 79,
+    "West Ham United": 79,
+    "Crystal Palace": 78,
+    "Fulham": 77,
+    "Brentford": 77,
+    "Everton": 77,
+    "Wolves": 76,
+    "Wolverhampton": 76,
+    "Bournemouth": 76,
+    "Nottingham Forest": 76,
+    "Leicester": 75,
+    "Leicester City": 75,
+    "Leeds": 75,
+    "Leeds United": 75,
+    "Southampton": 74,
+    "Burnley": 74,
+    "Sunderland": 73,
+
+    "Spain": 90, "España": 90,
+    "France": 92, "Francia": 92,
+    "Brazil": 91, "Brasil": 91,
     "Argentina": 91,
-    "England": 90,
-    "Inglaterra": 90,
+    "England": 90, "Inglaterra": 90,
     "Portugal": 89,
-    "Germany": 88,
-    "Alemania": 88,
-    "Netherlands": 88,
-    "Países Bajos": 88,
-    "Italy": 87,
-    "Italia": 87,
+    "Germany": 88, "Alemania": 88,
+    "Netherlands": 88, "Países Bajos": 88,
+    "Italy": 87, "Italia": 87,
     "Uruguay": 84,
-    "Belgium": 84,
-    "Bélgica": 84,
-    "Croatia": 83,
-    "Croacia": 83,
-    "USA": 80,
-    "United States": 80,
-    "Mexico": 80,
-    "México": 80,
-    "Morocco": 82,
-    "Marruecos": 82,
-    "Japan": 79,
-    "Japón": 79,
+    "Belgium": 84, "Bélgica": 84,
+    "Croatia": 83, "Croacia": 83,
+    "USA": 80, "United States": 80,
+    "Mexico": 80, "México": 80,
+    "Morocco": 82, "Marruecos": 82,
+    "Japan": 79, "Japón": 79,
 }
 
 DRAW_TRAP_TEAMS = {
@@ -215,6 +220,10 @@ AGGRESSIVE_CARD_TEAMS = {
     "cadiz",
     "alaves",
     "sporting",
+    "everton",
+    "wolverhampton",
+    "wolves",
+    "nottingham forest",
 }
 
 app = FastAPI(title="Tipster Tips Pro")
@@ -226,9 +235,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# =========================================================
-# BASIC HELPERS
-# =========================================================
+
 
 def read_json(path: str) -> Any:
     if not os.path.exists(path):
@@ -302,6 +309,12 @@ def simplify_team_name(name: str) -> str:
         "elche cf": "elche",
         "malaga cf": "malaga",
         "cordoba cf": "cordoba",
+        "tottenham hotspur": "tottenham",
+        "newcastle united": "newcastle",
+        "brighton hove albion": "brighton",
+        "west ham united": "west ham",
+        "leicester city": "leicester",
+        "leeds united": "leeds",
         "united states": "usa",
         "estados unidos": "usa",
     }
@@ -395,9 +408,9 @@ def confidence_band(confidence: int) -> str:
 
 
 def classify_pick(confidence: int) -> str:
-    if confidence >= 70:
+    if confidence >= 66:
         return "premium"
-    if confidence >= 60:
+    if confidence >= 58:
         return "strong"
     if confidence >= 45:
         return "medium"
@@ -423,22 +436,27 @@ def league_team_sanity_check(league: str, home: str, away: str) -> bool:
         "malaga", "cordoba", "deportivo",
     }
 
+    premier_teams = {
+        "manchester city", "arsenal", "liverpool", "manchester united",
+        "chelsea", "tottenham", "newcastle", "aston villa", "brighton",
+        "west ham", "crystal palace", "fulham", "brentford", "everton",
+        "wolves", "wolverhampton", "bournemouth", "nottingham forest",
+        "leicester", "leeds", "southampton", "burnley", "sunderland",
+    }
+
     if league_n == "laliga":
         return home_s in laliga_teams and away_s in laliga_teams
 
     if league_n == "segunda división":
         return home_s in segunda_teams and away_s in segunda_teams
 
+    if league_n == "premier league":
+        return home_s in premier_teams and away_s in premier_teams
+
     if league_n in {"champions league", "mundial"}:
         return True
 
     return True
-
-
-# =========================================================
-# API STATE
-# =========================================================
-
 def load_api_state() -> Dict[str, Any]:
     state = read_json(API_STATE_FILE)
     for name in ["sportsdb", "football_data", "api_football", "odds_api"]:
@@ -484,9 +502,7 @@ def api_is_available(api_name: str) -> bool:
         dt = TZ.localize(dt)
 
     return now_local() >= dt.astimezone(TZ)
-# =========================================================
-# SPORTSDB
-# =========================================================
+
 
 def sportsdb_get(path: str) -> Dict[str, Any]:
     r = requests.get(f"{SPORTSDB_BASE_URL}{path}", timeout=12)
@@ -593,10 +609,6 @@ def get_sportsdb_matches() -> List[Dict[str, Any]]:
         return []
 
 
-# =========================================================
-# API-FOOTBALL
-# =========================================================
-
 def api_football_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not API_FOOTBALL_KEY:
         raise RuntimeError("Falta API_FOOTBALL_KEY")
@@ -679,10 +691,6 @@ def get_api_football_matches() -> List[Dict[str, Any]]:
         return []
 
 
-# =========================================================
-# FOOTBALL-DATA
-# =========================================================
-
 def football_data_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not FOOTBALL_DATA_API_KEY:
         raise RuntimeError("Falta FOOTBALL_DATA_API_KEY")
@@ -755,9 +763,7 @@ def get_football_data_matches() -> List[Dict[str, Any]]:
     except Exception as e:
         set_api_cooldown("football_data", parse_requests_error(e))
         return []
-# =========================================================
-# ODDS API
-# =========================================================
+
 
 def odds_api_get(path: str, params: Dict[str, Any]) -> Any:
     if not ODDS_API_KEY:
@@ -873,12 +879,6 @@ def fetch_live_odds_index() -> Dict[Tuple[str, str, str], Dict[str, Any]]:
     except Exception as e:
         set_api_cooldown("odds_api", parse_requests_error(e))
         return {}
-
-
-# =========================================================
-# LIGHT LEARNING
-# =========================================================
-
 def load_model_stats() -> Dict[str, Any]:
     stats = read_json(MODEL_STATS_FILE)
     stats.setdefault("by_market", {})
@@ -948,10 +948,6 @@ def refresh_model_stats_from_history(history: Dict[str, Any]) -> None:
     save_model_stats(rebuild_model_stats_from_history(history))
 
 
-# =========================================================
-# MATCH MERGE
-# =========================================================
-
 def get_real_matches() -> List[Dict[str, Any]]:
     matches_by_source = {
         "api_football": get_api_football_matches(),
@@ -989,10 +985,6 @@ def get_real_matches() -> List[Dict[str, Any]]:
     unique.sort(key=lambda x: x["dt_local"])
     return unique[:60]
 
-
-# =========================================================
-# MARKET HELPERS
-# =========================================================
 
 def implied_probability(odds: float) -> Optional[float]:
     if not odds or odds <= 1:
@@ -1108,15 +1100,14 @@ def market_reliability_bonus(pick_type: str) -> int:
     if pick_type == "winner":
         return -4
     return 0
-# =========================================================
-# MARKET BUILDERS
-# =========================================================
+
 
 def predict_cards(league: str, home_strength: float, away_strength: float, home: str, away: str) -> Dict[str, int]:
     base_cards = {
         "LaLiga": 5,
         "Segunda División": 6,
         "Champions League": 4,
+        "Premier League": 4,
         "Mundial": 4,
     }
 
@@ -1145,12 +1136,12 @@ def team_cards_market(home: str, away: str, home_strength: float, away_strength:
     if diff >= 4:
         card_team = away
         card_team_s = away_s
-        line = 1.5 if league in {"Champions League", "Mundial"} else 2.5
+        line = 1.5 if league in {"Champions League", "Premier League", "Mundial"} else 2.5
         conf = 72 + min(abs_diff * 1.2, 10)
     elif diff <= -4:
         card_team = home
         card_team_s = home_s
-        line = 1.5 if league in {"Champions League", "Mundial"} else 2.5
+        line = 1.5 if league in {"Champions League", "Premier League", "Mundial"} else 2.5
         conf = 72 + min(abs_diff * 1.2, 10)
     else:
         if away_s in AGGRESSIVE_CARD_TEAMS:
@@ -1292,6 +1283,7 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
     })
 
     dc_pick = f"1X {home}" if diff >= 0 else f"X2 {away}"
+
     dc_conf = 74 + min(abs_diff * 1.1, 10)
 
     if draw_trap:
@@ -1426,12 +1418,6 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
         o["loser_team"] = loser
 
     return options
-
-
-# =========================================================
-# ENRICH / BUILDER
-# =========================================================
-
 def tipster_explanation(option: Dict[str, Any]) -> str:
     pick_type = option.get("pick_type")
 
@@ -1514,7 +1500,7 @@ def enrich_option_with_market(
 
     score = option["confidence"] + market_reliability_bonus(option["pick_type"])
 
-    enriched = {
+    return {
         "id": match["id"],
         "match": match["match"],
         "league": league,
@@ -1551,7 +1537,7 @@ def enrich_option_with_market(
         "recommended_for_combo": option["pick_type"] in SAFE_COMBO_MARKETS,
     }
 
-    return enriched
+
 def build_all_markets_for_match(
     match: Dict[str, Any],
     odds_index: Dict[Tuple[str, str, str], Dict[str, Any]],
@@ -1754,13 +1740,10 @@ def extract_simple_combo_candidates(match_catalog: List[Dict[str, Any]]) -> List
         for market in item.get("markets", []):
             if market.get("pick_type") not in allowed:
                 continue
-
             if market.get("confidence", 0) < 72:
                 continue
-
             if not market.get("odds_estimate"):
                 continue
-
             candidates.append(market)
 
     candidates.sort(
@@ -1848,6 +1831,18 @@ def build_picks() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         ),
         reverse=True,
     )
+
+    premium_count = sum(1 for p in candidates if p.get("tier") == "premium")
+
+    if premium_count < MIN_PREMIUM_PICKS:
+        for p in candidates:
+            if premium_count >= MIN_PREMIUM_PICKS:
+                break
+
+            if p.get("tier") != "premium" and p.get("confidence", 0) >= 60:
+                p["tier"] = "premium"
+                p["confidence_band"] = "alta"
+                premium_count += 1
 
     return candidates[:TARGET_PICKS], catalog
 
