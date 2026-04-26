@@ -33,13 +33,11 @@ MODEL_STATS_FILE = "model_stats.json"
 LOOKAHEAD_HOURS = 168
 CACHE_REFRESH_MINUTES = 15
 
-MAX_PICKS = 10
 TARGET_PICKS = 10
 MIN_PREMIUM_PICKS = 4
 
 MIN_BUILDER_SELECTIONS = 2
 MAX_BUILDER_SELECTIONS = 6
-
 MIN_BUILDER_ODDS = 1.50
 MAX_BUILDER_ODDS = 6.00
 
@@ -143,21 +141,6 @@ TEAM_RATINGS = {
     "Manchester City": 94,
     "Arsenal": 91,
     "Liverpool": 91,
-    "Bayern Munich": 92,
-    "Borussia Dortmund": 86,
-    "Paris Saint Germain": 91,
-    "Paris SG": 91,
-    "Inter": 90,
-    "Juventus": 86,
-    "AC Milan": 86,
-    "Napoli": 84,
-    "Benfica": 84,
-    "FC Porto": 83,
-    "PSV Eindhoven": 85,
-    "RB Leipzig": 84,
-    "Sporting CP": 83,
-    "Sporting Lisbon": 83,
-
     "Manchester United": 84,
     "Chelsea": 84,
     "Tottenham": 84,
@@ -184,6 +167,21 @@ TEAM_RATINGS = {
     "Southampton": 74,
     "Burnley": 74,
     "Sunderland": 73,
+
+    "Bayern Munich": 92,
+    "Borussia Dortmund": 86,
+    "Paris Saint Germain": 91,
+    "Paris SG": 91,
+    "Inter": 90,
+    "Juventus": 86,
+    "AC Milan": 86,
+    "Napoli": 84,
+    "Benfica": 84,
+    "FC Porto": 83,
+    "PSV Eindhoven": 85,
+    "RB Leipzig": 84,
+    "Sporting CP": 83,
+    "Sporting Lisbon": 83,
 
     "Spain": 90, "España": 90,
     "France": 92, "Francia": 92,
@@ -1064,9 +1062,17 @@ def safe_odds_from_confidence(confidence: int, market_type: str) -> float:
         base = 1.58 + (100 - confidence) * 0.007
         return round(min(max(base, 1.48), 2.25), 2)
 
-    if market_type == "team_cards":
+    if market_type in {"team_cards", "team_cards_1_5"}:
         base = 1.45 + (100 - confidence) * 0.006
         return round(min(max(base, 1.35), 2.00), 2)
+
+    if market_type == "both_teams_card_1_plus":
+        base = 1.38 + (100 - confidence) * 0.006
+        return round(min(max(base, 1.30), 1.85), 2)
+
+    if market_type == "both_teams_card_2_plus":
+        base = 1.75 + (100 - confidence) * 0.008
+        return round(min(max(base, 1.55), 2.50), 2)
 
     if market_type == "team_score_first_half":
         base = 1.85 + (100 - confidence) * 0.008
@@ -1085,12 +1091,16 @@ def market_reliability_bonus(pick_type: str) -> int:
         return 10
     if pick_type == "under_3_5":
         return 9
-    if pick_type == "team_cards":
-        return 6
+    if pick_type == "team_cards_1_5":
+        return 7
+    if pick_type == "both_teams_card_1_plus":
+        return 7
+    if pick_type == "both_teams_card_2_plus":
+        return 3
     if pick_type == "btts_no":
         return 5
     if pick_type == "over_2_5":
-        return 2
+        return 3
     if pick_type == "btts_yes":
         return 1
     if pick_type == "team_score_second_half":
@@ -1126,46 +1136,82 @@ def predict_cards(league: str, home_strength: float, away_strength: float, home:
     return {home: int(home_cards), away: int(away_cards)}
 
 
-def team_cards_market(home: str, away: str, home_strength: float, away_strength: float, league: str) -> Dict[str, Any]:
-    home_s = simplify_team_name(home)
-    away_s = simplify_team_name(away)
+def team_specific_cards_market(
+    team: str,
+    opponent: str,
+    team_strength: float,
+    opponent_strength: float,
+    league: str,
+    is_home: bool,
+) -> Dict[str, Any]:
+    team_s = simplify_team_name(team)
+    opponent_s = simplify_team_name(opponent)
 
-    diff = home_strength - away_strength
-    abs_diff = abs(diff)
+    diff = opponent_strength - team_strength
+    line = 1.5
+    conf = 68
+
+    if league in {"LaLiga", "Segunda División"}:
+        conf += 5
+    elif league == "Premier League":
+        conf += 2
+    elif league in {"Champions League", "Mundial"}:
+        conf -= 2
+
+    if team_s in AGGRESSIVE_CARD_TEAMS:
+        conf += 7
+
+    if opponent_s in {"real madrid", "barcelona", "manchester city", "arsenal", "liverpool", "psg", "bayern munich"}:
+        conf += 3
 
     if diff >= 4:
-        card_team = away
-        card_team_s = away_s
-        line = 1.5 if league in {"Champions League", "Premier League", "Mundial"} else 2.5
-        conf = 72 + min(abs_diff * 1.2, 10)
-    elif diff <= -4:
-        card_team = home
-        card_team_s = home_s
-        line = 1.5 if league in {"Champions League", "Premier League", "Mundial"} else 2.5
-        conf = 72 + min(abs_diff * 1.2, 10)
-    else:
-        if away_s in AGGRESSIVE_CARD_TEAMS:
-            card_team = away
-            card_team_s = away_s
-            line = 1.5
-            conf = 75
-        else:
-            card_team = home
-            card_team_s = home_s
-            line = 1.5
-            conf = 72
+        conf += 4
 
-    if card_team_s in AGGRESSIVE_CARD_TEAMS:
-        conf += 5
+    if not is_home:
+        conf += 1
+
+    conf = int(max(58, min(86, conf)))
 
     return {
-        "pick": f"Más de {line} tarjetas {card_team}",
-        "pick_type": "team_cards",
-        "confidence": int(min(conf, 88)),
-        "cards_team": card_team,
+        "pick": f"Más de {line} tarjetas {team}",
+        "pick_type": "team_cards_1_5",
+        "confidence": conf,
+        "cards_team": team,
         "cards_line": line,
         "trackable": False,
     }
+
+
+def both_teams_cards_market(league: str, draw_trap: bool) -> List[Dict[str, Any]]:
+    base = 70
+
+    if league in {"LaLiga", "Segunda División"}:
+        base += 6
+    elif league == "Premier League":
+        base += 3
+    elif league in {"Champions League", "Mundial"}:
+        base -= 2
+
+    if draw_trap:
+        base += 3
+
+    one_plus = int(max(62, min(88, base)))
+    two_plus = int(max(54, min(82, base - 8)))
+
+    return [
+        {
+            "pick": "Ambos equipos reciben 1+ tarjeta",
+            "pick_type": "both_teams_card_1_plus",
+            "confidence": one_plus,
+            "trackable": False,
+        },
+        {
+            "pick": "Ambos equipos reciben 2+ tarjetas",
+            "pick_type": "both_teams_card_2_plus",
+            "confidence": two_plus,
+            "trackable": False,
+        },
+    ]
 
 
 def team_to_score_half_markets(
@@ -1283,15 +1329,12 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
     })
 
     dc_pick = f"1X {home}" if diff >= 0 else f"X2 {away}"
-
     dc_conf = 74 + min(abs_diff * 1.1, 10)
 
     if draw_trap:
         dc_conf += 6
-
     if abs_diff < 4:
         dc_conf += 4
-
     if is_world_cup:
         dc_conf += 2
 
@@ -1393,7 +1436,29 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
         "trackable": True,
     })
 
-    options.append(team_cards_market(home, away, home_strength, away_strength, league))
+    options.append(
+        team_specific_cards_market(
+            team=home,
+            opponent=away,
+            team_strength=home_strength,
+            opponent_strength=away_strength,
+            league=league,
+            is_home=True,
+        )
+    )
+
+    options.append(
+        team_specific_cards_market(
+            team=away,
+            opponent=home,
+            team_strength=away_strength,
+            opponent_strength=home_strength,
+            league=league,
+            is_home=False,
+        )
+    )
+
+    options.extend(both_teams_cards_market(league, draw_trap))
 
     options.extend(
         team_to_score_half_markets(
@@ -1428,7 +1493,7 @@ def tipster_explanation(option: Dict[str, Any]) -> str:
         return "Mercado protegido para cubrir empate y reducir riesgo."
 
     if pick_type == "over_2_5":
-        return "Lectura de partido con ritmo y opciones de superar la línea de goles."
+        return "Línea ofensiva elegida solo si el partido apunta a ritmo y ocasiones."
 
     if pick_type == "under_3_5":
         return "Mercado de control para partidos que no apuntan a marcador descontrolado."
@@ -1439,8 +1504,8 @@ def tipster_explanation(option: Dict[str, Any]) -> str:
     if pick_type == "btts_no":
         return "El escenario permite que uno de los dos equipos se quede sin marcar."
 
-    if pick_type == "team_cards":
-        return "Predicción de tarjetas basada en presión defensiva, perfil del equipo y contexto del partido."
+    if pick_type in {"team_cards_1_5", "both_teams_card_1_plus", "both_teams_card_2_plus"}:
+        return "Mercado de tarjetas elegido por perfil disciplinario, presión defensiva y contexto del partido."
 
     if pick_type == "team_score_first_half":
         return "Predicción de gol en primera parte según ritmo inicial y producción esperada."
@@ -1609,14 +1674,13 @@ def build_bet_builder_for_match(
 
     base_candidates = [
         x for x in enriched
-        if x.get("pick_type") in {"double_chance", "under_3_5", "winner"}
+        if x.get("pick_type") in {"double_chance", "winner"}
         and x.get("confidence", 0) >= 68
     ]
 
     base_candidates.sort(
         key=lambda x: (
             1 if x.get("pick_type") == "double_chance" else 0,
-            1 if x.get("pick_type") == "under_3_5" else 0,
             x.get("confidence", 0),
             x.get("score", 0),
         ),
@@ -1629,12 +1693,11 @@ def build_bet_builder_for_match(
     builder: List[Dict[str, Any]] = [base_candidates[0]]
 
     preferred_order = [
-        "under_3_5",
-        "over_2_5",
-        "btts_yes",
+        "best_goals_line",
         "btts_no",
+        "btts_yes",
+        "best_cards_market",
         "team_score_second_half",
-        "team_cards",
         "team_score_first_half",
     ]
 
@@ -1642,18 +1705,94 @@ def build_bet_builder_for_match(
         if len(builder) >= MAX_BUILDER_SELECTIONS:
             break
 
+        if wanted_type == "best_goals_line":
+            under35 = [
+                x for x in enriched
+                if x.get("pick_type") == "under_3_5"
+                and compatible_with_builder(builder, x)
+                and x.get("confidence", 0) >= 72
+            ]
+
+            over25 = [
+                x for x in enriched
+                if x.get("pick_type") == "over_2_5"
+                and compatible_with_builder(builder, x)
+                and x.get("confidence", 0) >= 73
+            ]
+
+            goal_candidates = under35 + over25
+
+            goal_candidates.sort(
+                key=lambda x: (
+                    x.get("confidence", 0),
+                    1 if x.get("pick_type") == "over_2_5" else 0,
+                    x.get("score", 0),
+                ),
+                reverse=True,
+            )
+
+            if goal_candidates:
+                test_builder = builder + [goal_candidates[0]]
+
+                total_odds_test = 1.0
+                for item in test_builder:
+                    total_odds_test *= float(item.get("odds_estimate") or 1)
+
+                if total_odds_test <= MAX_BUILDER_ODDS:
+                    builder.append(goal_candidates[0])
+
+            continue
+
+        if wanted_type == "best_cards_market":
+            card_candidates = [
+                x for x in enriched
+                if x.get("pick_type") in {
+                    "team_cards_1_5",
+                    "both_teams_card_1_plus",
+                    "both_teams_card_2_plus",
+                }
+                and compatible_with_builder(builder, x)
+            ]
+
+            card_candidates = [
+                x for x in card_candidates
+                if (
+                    (x.get("pick_type") == "team_cards_1_5" and x.get("confidence", 0) >= 76)
+                    or (x.get("pick_type") == "both_teams_card_1_plus" and x.get("confidence", 0) >= 76)
+                    or (x.get("pick_type") == "both_teams_card_2_plus" and x.get("confidence", 0) >= 82)
+                )
+            ]
+
+            card_candidates.sort(
+                key=lambda x: (
+                    x.get("confidence", 0),
+                    x.get("score", 0),
+                    1 if x.get("pick_type") == "both_teams_card_1_plus" else 0,
+                ),
+                reverse=True,
+            )
+
+            if card_candidates:
+                test_builder = builder + [card_candidates[0]]
+
+                total_odds_test = 1.0
+                for item in test_builder:
+                    total_odds_test *= float(item.get("odds_estimate") or 1)
+
+                if total_odds_test <= MAX_BUILDER_ODDS:
+                    builder.append(card_candidates[0])
+
+            continue
+
         candidates = [
             x for x in enriched
             if x.get("pick_type") == wanted_type
             and compatible_with_builder(builder, x)
-            and x.get("confidence", 0) >= 68
+            and x.get("confidence", 0) >= 70
         ]
 
-        if wanted_type == "team_cards":
-            candidates = [x for x in candidates if x.get("confidence", 0) >= 74]
-
         if wanted_type in {"team_score_first_half", "team_score_second_half"}:
-            candidates = [x for x in candidates if x.get("confidence", 0) >= 70]
+            candidates = [x for x in candidates if x.get("confidence", 0) >= 74]
 
         candidates.sort(
             key=lambda x: (
@@ -1720,7 +1859,7 @@ def build_bet_builder_for_match(
         "stake": None,
         "tipster_explanation": (
             "Apuesta creada por Tipster Tips Pro con mercados compatibles del mismo partido. "
-            "El modelo prioriza lectura principal, control de goles y complementos solo si superan el filtro."
+            "El modelo prioriza doble oportunidad o ganador claro, mejor línea de goles y solo añade tarjetas si el filtro es alto."
         ),
         "cards": predict_cards(
             match["league"],
@@ -1806,6 +1945,13 @@ def get_premium_single_pick(
 
 def build_picks() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     matches = get_real_matches()
+
+    today = now_local().date()
+    today_matches = [m for m in matches if m["dt_local"].date() == today]
+
+    if len(today_matches) >= 4:
+        matches = today_matches + [m for m in matches if m not in today_matches]
+
     odds_index = fetch_live_odds_index()
 
     catalog = [build_all_markets_for_match(m, odds_index) for m in matches]
@@ -1826,6 +1972,7 @@ def build_picks() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     candidates.sort(
         key=lambda x: (
             x.get("confidence", 0),
+            0 if datetime.fromisoformat(x["kickoff_iso"]).astimezone(TZ).date() == today else 1,
             -abs(float(x.get("odds_estimate", 0) or 0) - 3.0),
             x.get("score", 0),
         ),
@@ -1947,7 +2094,13 @@ def evaluate_pick_result(pick: Dict[str, Any], home_goals: int, away_goals: int)
         for leg in legs:
             leg_type = leg.get("pick_type")
 
-            if leg_type in {"team_cards", "team_score_first_half", "team_score_second_half"}:
+            if leg_type in {
+                "team_cards_1_5",
+                "both_teams_card_1_plus",
+                "both_teams_card_2_plus",
+                "team_score_first_half",
+                "team_score_second_half",
+            }:
                 return "pending"
 
             leg_pick = dict(pick)
@@ -2245,10 +2398,21 @@ def build_payload() -> Dict[str, Any]:
     refresh_model_stats_from_history(history)
     dashboard_stats = compute_dashboard_stats(history)
 
-    combo_pool = [
+    raw_combo_pool = [
         p for p in (picks + extract_simple_combo_candidates(match_catalog))
         if is_today_or_tomorrow_pick(p)
     ]
+
+    today = now_local().date()
+
+    combo_pool = sorted(
+        raw_combo_pool,
+        key=lambda p: (
+            0 if datetime.fromisoformat(p["kickoff_iso"]).astimezone(TZ).date() == today else 1,
+            -p.get("confidence", 0),
+            -p.get("score", 0),
+        ),
+    )
 
     combo = build_combo(combo_pool) if combo_pool else {}
     premium_single = get_premium_single_pick(picks, combo) if picks else None
