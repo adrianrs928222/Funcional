@@ -650,11 +650,11 @@ def get_real_matches() -> List[Dict[str, Any]]:
     for m in matches:
 
         key = (
-            simplify_team_name(m["home_team"]),
-            simplify_team_name(m["away_team"]),
-            normalize_text(m["league"]),
-            m["dt_local"].strftime("%Y-%m-%d %H:%M"),
-        )
+    simplify_team_name(m["home_team"]),
+    simplify_team_name(m["away_team"]),
+    normalize_text(m["league"]),
+    m["dt_local"].strftime("%Y-%m-%d"),
+)
 
         if key in dedup:
             continue
