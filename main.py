@@ -260,25 +260,37 @@ def simplify_team_name(name: str) -> str:
     n = strip_accents(normalize_text(name))
 
     replacements = {
+        "rcd espanyol de barcelona": "espanyol",
+        "espanyol de barcelona": "espanyol",
+        "levante ud": "levante",
         "club atletico de madrid": "atletico madrid",
         "atletico de madrid": "atletico madrid",
-        "paris saint germain": "psg",
-        "paris sg": "psg",
+        "real sporting de gijon": "sporting",
+        "sporting gijon": "sporting",
+        "brighton hove albion": "brighton",
         "tottenham hotspur": "tottenham",
         "newcastle united": "newcastle",
         "west ham united": "west ham",
-        "brighton hove albion": "brighton",
         "leicester city": "leicester",
         "leeds united": "leeds",
+        "wolverhampton wanderers": "wolves",
         "wolverhampton": "wolves",
-        "sporting gijon": "sporting",
-        "sporting gijón": "sporting",
+        "manchester united": "man united",
+        "manchester city": "man city",
     }
 
     for old, new in replacements.items():
         n = n.replace(old, new)
 
-    return " ".join(n.split())
+    remove_words = {
+        "fc", "cf", "cd", "ud", "sd", "rcd", "rc",
+        "club", "de", "del", "la", "el",
+        "football", "futbol", "balompie",
+    }
+
+    tokens = [t for t in n.split() if t not in remove_words]
+
+    return " ".join(tokens).strip()
 
 
 def league_team_sanity_check(
