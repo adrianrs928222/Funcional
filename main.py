@@ -859,15 +859,16 @@ options.append({
 
 winner_conf = 66 + min(abs_diff * 1.5, 16)
 
-if draw_trap:
-    winner_conf -= 8
-options.append({
-    "pick": f"Gana {winner}",
-    "pick_type": "winner",
-    "confidence": int(max(58, min(84, winner_conf))),
-    "winner_team": winner,
-    "trackable": True,
-})
+    if draw_trap:
+        winner_conf -= 8
+
+    options.append({
+        "pick": f"Gana {winner}",
+        "pick_type": "winner",
+        "confidence": int(max(58, min(84, winner_conf))),
+        "winner_team": winner,
+        "trackable": True,
+    })
 
     dc_pick = f"1X {home}" if diff >= 0 else f"X2 {away}"
 
