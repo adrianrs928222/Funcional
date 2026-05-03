@@ -845,21 +845,22 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
         goals_interval_conf = 74
 
     winner = home if home_strength >= away_strength else away
-    draw_trap = is_draw_trap(home, away, abs_diff)
 
-    options: List[Dict[str, Any]] = []
+draw_trap = is_draw_trap(home, away, abs_diff)
 
-    options.append({
-        "pick": goals_interval_pick,
-        "pick_type": "goals_interval",
-        "confidence": int(max(68, min(86, goals_interval_conf))),
-        "trackable": True,
-    })
+options: List[Dict[str, Any]] = []
+
+options.append({
+    "pick": goals_interval_pick,
+    "pick_type": "goals_interval",
+    "confidence": int(max(68, min(86, goals_interval_conf))),
+    "trackable": True,
+})
+
 winner_conf = 66 + min(abs_diff * 1.5, 16)
 
 if draw_trap:
     winner_conf -= 8
-
 options.append({
     "pick": f"Gana {winner}",
     "pick_type": "winner",
