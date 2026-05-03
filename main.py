@@ -80,7 +80,6 @@ TEAM_RATINGS = {
     "Celta Vigo": 75,
     "Alaves": 73,
     "Alavés": 73,
-
     "Almería": 78,
     "Almeria": 78,
     "Granada": 77,
@@ -104,7 +103,6 @@ TEAM_RATINGS = {
     "Malaga": 72,
     "Córdoba": 70,
     "Cordoba": 70,
-
     "Manchester City": 94,
     "Arsenal": 91,
     "Liverpool": 91,
@@ -134,7 +132,6 @@ TEAM_RATINGS = {
     "Southampton": 74,
     "Burnley": 74,
     "Sunderland": 73,
-
     "Bayern Munich": 92,
     "Paris Saint Germain": 91,
     "Paris SG": 91,
@@ -144,7 +141,6 @@ TEAM_RATINGS = {
     "Benfica": 84,
     "FC Porto": 83,
     "PSV Eindhoven": 85,
-
     "Spain": 90,
     "España": 90,
     "France": 92,
@@ -166,7 +162,6 @@ TEAM_RATINGS = {
     "México": 80,
     "USA": 80,
 }
-
 DRAW_TRAP_TEAMS = {
     "atletico madrid",
     "getafe",
@@ -202,6 +197,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
 def now_local() -> datetime:
     return datetime.now(TZ)
 
@@ -281,16 +278,26 @@ def simplify_team_name(name: str) -> str:
         n = n.replace(old, new)
 
     remove_words = {
-        "fc", "cf", "cd", "ud", "sd", "rcd", "rc",
-        "club", "de", "del", "la", "el",
-        "football", "futbol", "balompie",
+        "fc",
+        "cf",
+        "cd",
+        "ud",
+        "sd",
+        "rcd",
+        "rc",
+        "club",
+        "de",
+        "del",
+        "la",
+        "el",
+        "football",
+        "futbol",
+        "balompie",
     }
 
     tokens = [t for t in n.split() if t not in remove_words]
 
     return " ".join(tokens).strip()
-
-
 def league_team_sanity_check(league: str, home: str, away: str) -> bool:
     return True
 
@@ -310,18 +317,7 @@ def public_confidence(confidence: int) -> int:
     return int(max(MIN_PUBLIC_CONFIDENCE, min(MAX_PUBLIC_CONFIDENCE, confidence)))
 
 
-def classify_pick(confidence: int) -> str:
-    return "premium"
-
-
-def confidence_band(confidence: int) -> str:
-    return "alta"
-
-
-def parse_sportsdb_datetime(
-    date_str: Optional[str],
-    time_str: Optional[str],
-) -> datetime:
+def parse_sportsdb_datetime(date_str: Optional[str], time_str: Optional[str]) -> datetime:
     date_str = (date_str or "").strip()
     time_str = (time_str or "00:00:00").replace("Z", "").strip()
 
@@ -351,12 +347,10 @@ def extract_home_away_sportsdb(event: Dict[str, Any]) -> Dict[str, str]:
         return {"home": a.strip(), "away": b.strip()}
 
     raise ValueError("No teams")
-def sportsdb_get(path: str) -> Dict[str, Any]:
-    r = requests.get(
-        f"{SPORTSDB_BASE_URL}{path}",
-        timeout=12,
-    )
 
+
+def sportsdb_get(path: str) -> Dict[str, Any]:
+    r = requests.get(f"{SPORTSDB_BASE_URL}{path}", timeout=12)
     r.raise_for_status()
     return r.json()
 
@@ -373,10 +367,7 @@ def get_sportsdb_matches() -> List[Dict[str, Any]]:
 
         for season in SEASON_CANDIDATES_SPORTSDB:
             try:
-                data = sportsdb_get(
-                    f"/eventsseason.php?id={league_id}&s={season}"
-                )
-
+                data = sportsdb_get(f"/eventsseason.php?id={league_id}&s={season}")
                 evs = data.get("events") or []
 
                 if evs:
@@ -386,10 +377,7 @@ def get_sportsdb_matches() -> List[Dict[str, Any]]:
                 pass
 
         try:
-            next_data = sportsdb_get(
-                f"/eventsnextleague.php?id={league_id}"
-            )
-
+            next_data = sportsdb_get(f"/eventsnextleague.php?id={league_id}")
             events.extend(next_data.get("events") or [])
         except Exception:
             pass
@@ -397,11 +385,7 @@ def get_sportsdb_matches() -> List[Dict[str, Any]]:
         for ev in events:
             try:
                 teams = extract_home_away_sportsdb(ev)
-
-                dt_local = parse_sportsdb_datetime(
-                    ev.get("dateEvent"),
-                    ev.get("strTime"),
-                )
+                dt_local = parse_sportsdb_datetime(ev.get("dateEvent"), ev.get("strTime"))
             except Exception:
                 continue
 
@@ -432,18 +416,11 @@ def get_sportsdb_matches() -> List[Dict[str, Any]]:
 
     out.sort(key=lambda x: x["dt_local"])
     return out
-
-
-def api_football_get(
-    path: str,
-    params: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+def api_football_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not API_FOOTBALL_KEY:
         return {}
 
-    headers = {
-        "x-apisports-key": API_FOOTBALL_KEY,
-    }
+    headers = {"x-apisports-key": API_FOOTBALL_KEY}
 
     r = requests.get(
         f"{API_FOOTBALL_BASE_URL}{path}",
@@ -493,7 +470,6 @@ def get_api_football_matches() -> List[Dict[str, Any]]:
 
                 home = (teams.get("home") or {}).get("name")
                 away = (teams.get("away") or {}).get("name")
-
                 date_str = fixture.get("date")
 
                 if not home or not away or not date_str:
@@ -520,16 +496,13 @@ def get_api_football_matches() -> List[Dict[str, Any]]:
 
     out.sort(key=lambda x: x["dt_local"])
     return out
-def football_data_get(
-    path: str,
-    params: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+
+
+def football_data_get(path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not FOOTBALL_DATA_API_KEY:
         return {}
 
-    headers = {
-        "X-Auth-Token": FOOTBALL_DATA_API_KEY,
-    }
+    headers = {"X-Auth-Token": FOOTBALL_DATA_API_KEY}
 
     r = requests.get(
         f"{FOOTBALL_DATA_BASE_URL}{path}",
@@ -566,7 +539,6 @@ def get_football_data_matches() -> List[Dict[str, Any]]:
         for item in data.get("matches") or []:
             try:
                 utc_date = item.get("utcDate")
-
                 home = ((item.get("homeTeam") or {}).get("name") or "").strip()
                 away = ((item.get("awayTeam") or {}).get("name") or "").strip()
 
@@ -630,8 +602,6 @@ def get_real_matches() -> List[Dict[str, Any]]:
 
     final.sort(key=lambda x: x["dt_local"])
     return final
-
-
 def market_reliability_bonus(pick_type: str) -> int:
     if pick_type == "double_chance":
         return 10
@@ -660,55 +630,29 @@ def market_reliability_bonus(pick_type: str) -> int:
     return 0
 
 
-def safe_odds_from_confidence(
-    confidence: int,
-    market_type: str,
-) -> float:
+def safe_odds_from_confidence(confidence: int, market_type: str) -> float:
     if market_type == "double_chance":
-        return round(
-            min(max(1.22, 1.25 + (100 - confidence) * 0.005), 1.70),
-            2,
-        )
+        return round(min(max(1.22, 1.25 + (100 - confidence) * 0.005), 1.70), 2)
 
     if market_type == "goals_interval":
-        return round(
-            min(max(1.35, 1.45 + (100 - confidence) * 0.005), 1.90),
-            2,
-        )
+        return round(min(max(1.35, 1.45 + (100 - confidence) * 0.005), 1.90), 2)
 
     if market_type == "under_3_5":
-        return round(
-            min(max(1.30, 1.34 + (100 - confidence) * 0.005), 1.85),
-            2,
-        )
+        return round(min(max(1.30, 1.34 + (100 - confidence) * 0.005), 1.85), 2)
 
     if market_type == "over_2_5":
-        return round(
-            min(max(1.55, 1.60 + (100 - confidence) * 0.006), 2.20),
-            2,
-        )
+        return round(min(max(1.55, 1.60 + (100 - confidence) * 0.006), 2.20), 2)
 
     if market_type == "btts_no":
-        return round(
-            min(max(1.52, 1.58 + (100 - confidence) * 0.006), 2.15),
-            2,
-        )
+        return round(min(max(1.52, 1.58 + (100 - confidence) * 0.006), 2.15), 2)
 
     if market_type == "btts_yes":
-        return round(
-            min(max(1.60, 1.65 + (100 - confidence) * 0.006), 2.25),
-            2,
-        )
+        return round(min(max(1.60, 1.65 + (100 - confidence) * 0.006), 2.25), 2)
 
-    return round(
-        min(max(1.45, 1.55 + (100 - confidence) * 0.006), 2.50),
-        2,
-    )
-def is_draw_trap(
-    home: str,
-    away: str,
-    abs_diff: float,
-) -> bool:
+    return round(min(max(1.45, 1.55 + (100 - confidence) * 0.006), 2.50), 2)
+
+
+def is_draw_trap(home: str, away: str, abs_diff: float) -> bool:
     home_s = simplify_team_name(home)
     away_s = simplify_team_name(away)
 
@@ -733,7 +677,6 @@ def team_specific_cards_market(
     opponent_s = simplify_team_name(opponent)
 
     diff = opponent_strength - team_strength
-
     conf = 68
 
     if league in {"LaLiga", "Segunda División"}:
@@ -771,10 +714,7 @@ def team_specific_cards_market(
     }
 
 
-def both_teams_cards_market(
-    league: str,
-    draw_trap: bool,
-) -> List[Dict[str, Any]]:
+def both_teams_cards_market(league: str, draw_trap: bool) -> List[Dict[str, Any]]:
     base = 70
 
     if league in {"LaLiga", "Segunda División"}:
@@ -801,8 +741,6 @@ def both_teams_cards_market(
             "trackable": False,
         },
     ]
-
-
 def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
     home = match["home_team"]
     away = match["away_team"]
@@ -845,19 +783,18 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
         goals_interval_conf = 74
 
     winner = home if home_strength >= away_strength else away
+    draw_trap = is_draw_trap(home, away, abs_diff)
 
-draw_trap = is_draw_trap(home, away, abs_diff)
+    options: List[Dict[str, Any]] = []
 
-options: List[Dict[str, Any]] = []
+    options.append({
+        "pick": goals_interval_pick,
+        "pick_type": "goals_interval",
+        "confidence": int(max(68, min(86, goals_interval_conf))),
+        "trackable": True,
+    })
 
-options.append({
-    "pick": goals_interval_pick,
-    "pick_type": "goals_interval",
-    "confidence": int(max(68, min(86, goals_interval_conf))),
-    "trackable": True,
-})
-
-winner_conf = 66 + min(abs_diff * 1.5, 16)
+    winner_conf = 66 + min(abs_diff * 1.5, 16)
 
     if draw_trap:
         winner_conf -= 8
@@ -871,7 +808,6 @@ winner_conf = 66 + min(abs_diff * 1.5, 16)
     })
 
     dc_pick = f"1X {home}" if diff >= 0 else f"X2 {away}"
-
     dc_conf = 74 + min(abs_diff * 1.1, 10)
 
     if draw_trap:
@@ -995,27 +931,11 @@ winner_conf = 66 + min(abs_diff * 1.5, 16)
     )
 
     for option in options:
-        option["score"] = (
-            option.get("confidence", 0)
-            + market_reliability_bonus(option.get("pick_type", ""))
-        )
+        option["score"] = option.get("confidence", 0) + market_reliability_bonus(option.get("pick_type", ""))
 
     return options
-
-
-def tipster_explanation(option: Dict[str, Any]) -> str:
-    return ""
-
-
-def enrich_option(
-    match: Dict[str, Any],
-    option: Dict[str, Any],
-) -> Dict[str, Any]:
-    odds = safe_odds_from_confidence(
-        option["confidence"],
-        option["pick_type"],
-    )
-
+def enrich_option(match: Dict[str, Any], option: Dict[str, Any]) -> Dict[str, Any]:
+    odds = safe_odds_from_confidence(option["confidence"], option["pick_type"])
     confidence = public_confidence(option["confidence"])
 
     return {
@@ -1040,10 +960,7 @@ def enrich_option(
     }
 
 
-def compatible_with_builder(
-    existing: List[Dict[str, Any]],
-    candidate: Dict[str, Any],
-) -> bool:
+def compatible_with_builder(existing: List[Dict[str, Any]], candidate: Dict[str, Any]) -> bool:
     existing_types = {x.get("pick_type") for x in existing}
     ctype = candidate.get("pick_type")
 
@@ -1063,6 +980,8 @@ def compatible_with_builder(
         return False
 
     return True
+
+
 def builder_total_odds(builder: List[Dict[str, Any]]) -> float:
     total = 1.0
 
@@ -1074,11 +993,7 @@ def builder_total_odds(builder: List[Dict[str, Any]]) -> float:
 
 def build_bet_builder_for_match(match: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     options = build_market_options(match)
-
-    enriched = [
-        enrich_option(match, dict(option))
-        for option in options
-    ]
+    enriched = [enrich_option(match, dict(option)) for option in options]
 
     enriched.sort(
         key=lambda x: (
@@ -1117,11 +1032,7 @@ def build_bet_builder_for_match(match: Dict[str, Any]) -> Optional[Dict[str, Any
     if interval_candidates:
         builder.append(interval_candidates[0])
 
-    preferred_order = [
-        "btts_no",
-        "btts_yes",
-        "best_cards_market",
-    ]
+    preferred_order = ["btts_no", "btts_yes", "best_cards_market"]
 
     for wanted_type in preferred_order:
         if len(builder) >= MAX_BUILDER_SELECTIONS:
@@ -1130,10 +1041,7 @@ def build_bet_builder_for_match(match: Dict[str, Any]) -> Optional[Dict[str, Any
         if wanted_type == "best_cards_market":
             card_candidates = [
                 x for x in enriched
-                if x.get("pick_type") in {
-                    "team_cards_1_5",
-                    "both_teams_card_1_plus",
-                }
+                if x.get("pick_type") in {"team_cards_1_5", "both_teams_card_1_plus"}
                 and compatible_with_builder(builder, x)
                 and x.get("confidence", 0) >= 76
             ]
@@ -1185,10 +1093,7 @@ def build_bet_builder_for_match(match: Dict[str, Any]) -> Optional[Dict[str, Any
     if total_odds < MIN_BUILDER_ODDS or total_odds > MAX_BUILDER_ODDS:
         return None
 
-    confidence = int(
-        sum(x.get("confidence", 0) for x in builder) / len(builder)
-    )
-
+    confidence = int(sum(x.get("confidence", 0) for x in builder) / len(builder))
     confidence = public_confidence(confidence)
 
     selections = [x.get("pick", "--") for x in builder]
@@ -1219,7 +1124,6 @@ def build_bet_builder_for_match(match: Dict[str, Any]) -> Optional[Dict[str, Any
 
 def build_picks() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     matches = get_real_matches()
-
     candidates = []
 
     for match in matches:
@@ -1241,10 +1145,6 @@ def build_picks() -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         ),
         reverse=True,
     )
-
-    for pick in candidates:
-        pick["tier"] = "premium"
-        pick["confidence_band"] = "alta"
 
     return candidates[:TARGET_PICKS], []
 
@@ -1295,9 +1195,7 @@ def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
     for pick in combo:
         total_odds *= float(pick.get("odds_estimate") or 1)
 
-    confidence = int(
-        sum(p.get("confidence", 0) for p in combo) / len(combo)
-    )
+    confidence = int(sum(p.get("confidence", 0) for p in combo) / len(combo))
 
     return {
         "size": 3,
@@ -1307,14 +1205,8 @@ def build_combo(picks: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def get_premium_single_pick(
-    picks: List[Dict[str, Any]],
-    combo: Dict[str, Any],
-) -> Optional[Dict[str, Any]]:
-    combo_matches = {
-        p.get("match")
-        for p in combo.get("picks", [])
-    }
+def get_premium_single_pick(picks: List[Dict[str, Any]], combo: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    combo_matches = {p.get("match") for p in combo.get("picks", [])}
 
     candidates = [
         p for p in picks
