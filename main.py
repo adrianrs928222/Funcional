@@ -898,6 +898,18 @@ if total_xg <= 2.15:
     draw_trap = is_draw_trap(home, away, abs_diff)
 
     options: List[Dict[str, Any]] = []
+draw_trap = is_draw_trap(home, away, abs_diff)
+
+options: List[Dict[str, Any]] = []
+
+options.append({
+    "pick": goals_interval_pick,
+    "pick_type": "goals_interval",
+    "confidence": int(max(68, min(86, goals_interval_conf))),
+    "trackable": True,
+})
+
+winner_conf = 66 + min(abs_diff * 1.5, 16)
 
     winner_conf = 66 + min(abs_diff * 1.5, 16)
 
