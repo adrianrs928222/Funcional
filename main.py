@@ -897,9 +897,6 @@ if total_xg <= 2.15:
 
     draw_trap = is_draw_trap(home, away, abs_diff)
 
-    options: List[Dict[str, Any]] = []
-draw_trap = is_draw_trap(home, away, abs_diff)
-
 options: List[Dict[str, Any]] = []
 
 options.append({
@@ -910,8 +907,6 @@ options.append({
 })
 
 winner_conf = 66 + min(abs_diff * 1.5, 16)
-
-    winner_conf = 66 + min(abs_diff * 1.5, 16)
 
     if draw_trap:
         winner_conf -= 8
