@@ -1032,7 +1032,7 @@ def build_bet_builder_for_match(match: Dict[str, Any]) -> Optional[Dict[str, Any
     if interval_candidates:
         builder.append(interval_candidates[0])
 
-    preferred_order = ["btts_no", "btts_yes", "best_cards_market"]
+    preferred_order = ["btts_yes", "best_cards_market"]
 
     for wanted_type in preferred_order:
         if len(builder) >= MAX_BUILDER_SELECTIONS:
