@@ -877,6 +877,21 @@ def build_market_options(match: Dict[str, Any]) -> List[Dict[str, Any]]:
         away_xg *= 0.92
 
     total_xg = home_xg + away_xg
+if total_xg <= 2.15:
+        goals_interval_pick = "0-2 goles"
+        goals_interval_conf = 76
+    elif total_xg <= 2.65:
+        goals_interval_pick = "1-3 goles"
+        goals_interval_conf = 78
+    elif total_xg <= 3.10:
+        goals_interval_pick = "1-4 goles"
+        goals_interval_conf = 77
+    elif total_xg <= 3.55:
+        goals_interval_pick = "2-4 goles"
+        goals_interval_conf = 75
+    else:
+        goals_interval_pick = "2-5 goles"
+        goals_interval_conf = 74
 
     winner = home if home_strength >= away_strength else away
 
